@@ -350,3 +350,14 @@ logging:
 | TC11.9 | CLI args override YAML config | CLI takes precedence |
 | TC11.10 | YAML-only config | All settings applied from YAML |
 | TC11.11 | No config (all defaults) | Server starts with sensible defaults |
+
+### Backward Compatibility Tests
+
+The ultimate validation: xPyD-sim must be a drop-in replacement for both existing dummy implementations.
+
+| ID | Test | Expected |
+|---|---|---|
+| TC12.1 | Replace proxy's dummy_nodes with xpyd-sim, run all proxy tests | All proxy tests pass |
+| TC12.2 | Replace bench's dummy server with xpyd-sim, run all bench tests | All bench tests pass |
+
+These tests ensure xpyd-sim is fully backward compatible. If any test fails, it indicates a gap in xpyd-sim that must be fixed before the migration is complete.

@@ -56,6 +56,10 @@ class ServerConfig:
     eos_min_ratio: float = 0.5
     max_model_len: int = 131072
     default_max_tokens: int = 16
+    warmup_requests: int = 0
+    warmup_penalty_ms: float = 0.0
+    log_requests: str | None = None
+    profile: str | None = None
 
 
 def _compute_output_length(

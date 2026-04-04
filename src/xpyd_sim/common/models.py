@@ -145,6 +145,7 @@ class ModelCard(BaseModel):
     object: str = "model"
     created: int = 0
     owned_by: str = "xpyd-sim"
+    max_model_len: Optional[int] = None
 
 
 class ModelListResponse(BaseModel):

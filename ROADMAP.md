@@ -25,7 +25,7 @@ Based on [DESIGN.md](docs/DESIGN.md). Finite loop — complete when all 56 test 
 - max_model_len in model card
 - TC6.x, TC11.x
 
-## M4: CLI + YAML Configuration ⬜
+## M4: CLI + YAML Configuration ✅
 - CLI args for all settings
 - YAML config file support (--config)
 - CLI overrides YAML

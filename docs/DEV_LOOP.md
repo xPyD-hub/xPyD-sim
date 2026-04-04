@@ -1,6 +1,6 @@
 # Development Loop
 
-Autonomous infinite loop. Runs until explicitly stopped.
+Finite loop. Runs until all milestones in ROADMAP.md are complete (all 56 test cases pass).
 
 ## Setup (every iteration)
 ```
@@ -11,30 +11,23 @@ git config user.name "hlin99"
 ## Each Iteration
 
 1. Pull latest code
-2. Read ROADMAP.md — find the next incomplete milestone
-3. Read DESIGN_PRINCIPLES.md — follow the rules
-4. Check open issues/PRs — handle unmerged PRs first (fix CI failures, merge if ready)
-5. If no milestone left, create new ones (see Phase 2 below)
-6. Create GitHub Issue: problem, solution, acceptance criteria, tests
-7. Create branch, implement code + tests
-8. Pass lint: ruff check src tests && isort --check src tests
-9. Create PR (body contains Closes #N)
-10. Wait for CI green. Fix failures. Never merge red CI.
-11. Self-review against acceptance criteria and DESIGN_PRINCIPLES.md
-12. Squash merge
-13. Update ROADMAP.md, push to main
-14. Go to step 1
+2. Read `ROADMAP.md` — find the next incomplete milestone
+3. Read `docs/DESIGN.md` — the authoritative spec, follow it exactly
+4. Read `docs/DESIGN_PRINCIPLES.md` — follow the rules
+5. Check open issues/PRs — handle unmerged PRs first (fix CI failures, merge if ready)
+6. If all milestones done → report completion and stop
+7. Create GitHub Issue: what to implement, which test cases to cover
+8. Create branch, implement code + tests
+9. Pass lint: `ruff check src tests && isort --check src tests`
+10. Create PR (body contains `Closes #N`)
+11. Wait for CI green. Fix failures. Never merge red CI.
+12. Self-review against DESIGN.md test cases
+13. Squash merge
+14. Update ROADMAP.md, push to main
+15. Go to step 1
 
 ## Rules
-- Committer must be hlin99 <tony.lin@intel.com>
+- Committer must be `hlin99 <tony.lin@intel.com>`
 - All code, docs, issues, PRs in English
 - Commit messages: conventional commits format
-
-## Phase 1: Roadmap-Driven
-Follow ROADMAP.md milestones in order.
-
-## Phase 2: Continuous Evolution
-When all milestones are done:
-1. Review the project — find limitations, improvements, new scenarios
-2. Create new milestones in ROADMAP.md
-3. Return to Phase 1
+- DESIGN.md is the source of truth — implement exactly what it says

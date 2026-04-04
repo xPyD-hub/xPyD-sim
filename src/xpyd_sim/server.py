@@ -682,29 +682,31 @@ async def _stream_chat_scheduled(
         )
         yield f"data: {chunk.model_dump_json()}\n\n"
 
-        # Wait for tokens from scheduler
-        text_so_far = ""
+        # Collect all tokens from scheduler first, then apply stop
+        # truncation and stream the safe output.
+        token_count = 0
         while True:
             msg_type, value = await inf_req.token_queue.get()
             if msg_type == "error":
                 break
             if msg_type == "done":
                 break
-            # msg_type == "token"
-            token_idx = value
-            char = render_dummy_text(token_idx)[-1] if token_idx > 0 else "T"
-            text_so_far += char
+            token_count += 1
 
-            # Check stop sequences
-            finish_early = False
-            if req.stop:
-                _, was_stopped = _check_stop_sequences(text_so_far, req.stop)
-                if was_stopped:
-                    finish_early = True
+        # Build full text, apply stop truncation, then stream
+        text = render_dummy_text(token_count)
+        finish_reason_override = None
+        if req.stop:
+            text, was_stopped = _check_stop_sequences(text, req.stop)
+            if was_stopped:
+                finish_reason_override = "stop"
 
+        tokens = text.split(" ") if text else []
+        for i, token in enumerate(tokens):
+            token_text = (" " + token) if i > 0 else token
             chunk_lp = None
             if req.logprobs and req.top_logprobs and req.top_logprobs > 0:
-                chunk_lp = generate_chat_logprobs([char], req.top_logprobs)
+                chunk_lp = generate_chat_logprobs([token_text], req.top_logprobs)
             chunk = ChatCompletionChunk(
                 id=req_id,
                 created=created,
@@ -712,7 +714,7 @@ async def _stream_chat_scheduled(
                 choices=[
                     StreamChoice(
                         index=idx,
-                        delta=DeltaMessage(content=char),
+                        delta=DeltaMessage(content=token_text),
                         logprobs=chunk_lp,
                     )
                 ],
@@ -721,11 +723,11 @@ async def _stream_chat_scheduled(
             yield f"data: {chunk.model_dump_json()}\n\n"
             total_completion += 1
 
-            if finish_early:
-                break
-
         # Finish chunk
-        finish_reason = inf_req.finish_reason if inf_req.is_done() else "stop"
+        if finish_reason_override:
+            finish_reason = finish_reason_override
+        else:
+            finish_reason = inf_req.finish_reason if inf_req.is_done() else "stop"
         chunk = ChatCompletionChunk(
             id=req_id,
             created=created,
@@ -799,20 +801,16 @@ async def _stream_chat(
         )
         yield f"data: {chunk.model_dump_json()}\n\n"
 
+        # Apply stop sequence truncation before streaming (ensures identical
+        # output to non-streaming mode).
+        if req.stop:
+            text, stopped = _check_stop_sequences(text, req.stop)
+            if stopped:
+                finish_reason = "stop"
+
         # Content chunks (per token)
         tokens = text.split(" ") if text else []
-        emitted = ""
         for i, token in enumerate(tokens):
-            if i > 0:
-                emitted += " "
-            emitted += token
-            # Check stop sequences
-            if req.stop:
-                _, was_stopped = _check_stop_sequences(emitted, req.stop)
-                if was_stopped:
-                    finish_reason = "stop"
-                    break
-
             await asyncio.sleep(decode_delay)
             # Generate per-token logprobs for chat streaming
             token_text = (" " + token) if i > 0 else token
@@ -914,18 +912,14 @@ async def _stream_completion(
             )
             yield f"data: {echo_chunk.model_dump_json()}\n\n"
 
-        tokens = text.split(" ") if text else []
-        emitted = ""
-        for i, token in enumerate(tokens):
-            if i > 0:
-                emitted += " "
-            emitted += token
-            if req.stop:
-                _, was_stopped = _check_stop_sequences(emitted, req.stop)
-                if was_stopped:
-                    finish_reason = "stop"
-                    break
+        # Apply stop sequence truncation before streaming
+        if req.stop:
+            text, stopped = _check_stop_sequences(text, req.stop)
+            if stopped:
+                finish_reason = "stop"
 
+        tokens = text.split(" ") if text else []
+        for i, token in enumerate(tokens):
             await asyncio.sleep(decode_delay)
             token_text = (" " + token) if i > 0 else token
             chunk_lp = None

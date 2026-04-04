@@ -39,7 +39,7 @@ Based on [DESIGN.md](docs/DESIGN.md). Finite loop — complete when all 56 test 
 - Profile mode: load fitted curves at startup
 - TC7.x
 
-## M6: Observability ⬜
+## M6: Observability ✅
 - /metrics endpoint (Prometheus format)
 - Request logging to JSONL
 - /health returns mode + config

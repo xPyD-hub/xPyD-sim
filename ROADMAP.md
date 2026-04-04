@@ -60,7 +60,7 @@ Based on [DESIGN.md](docs/DESIGN.md). Finite loop — complete when all 56 test 
 ## Done Criteria
 All 56 test cases pass → project complete.
 
-## M9: Scheduling & Batching ⬜
+## M9: Scheduling & Batching ✅
 - Prefill scheduling: blocking batch formation with max_num_batched_tokens and max_num_seqs
 - Decode scheduling: iteration-granularity batching with batch-in/batch-out
 - Engine loop: unified prefill→decode pipeline with realistic scheduling

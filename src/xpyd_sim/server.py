@@ -143,6 +143,39 @@ def _check_stop_sequences(text: str, stop: str | list[str] | None) -> tuple[str,
     return text, False
 
 
+def _is_prefix_of_any_stop(text: str, stop: list[str]) -> bool:
+    """Check if text ends with a prefix of any stop sequence."""
+    for seq in stop:
+        for length in range(1, len(seq) + 1):
+            if text.endswith(seq[:length]):
+                return True
+    return False
+
+
+def _flush_safe_chars(buffer: str, stop: list[str]) -> tuple[str, str]:
+    """Split buffer into safe-to-emit prefix and held-back suffix.
+
+    Returns (safe, held) where safe can be yielded immediately and held
+    must be kept in the buffer because it could be a stop sequence prefix.
+    """
+    # Try to emit as much as possible from the start of buffer
+    for i in range(len(buffer), 0, -1):
+        candidate = buffer[:i]
+        remaining = buffer[i:]
+        if not _is_prefix_of_any_stop(candidate + remaining, stop):
+            # Actually we need to check if remaining is a prefix of a stop seq
+            pass
+    # Simpler approach: find the longest suffix of buffer that is a prefix of any stop seq
+    hold_len = 0
+    for seq in stop:
+        for length in range(1, min(len(seq), len(buffer)) + 1):
+            if buffer.endswith(seq[:length]):
+                hold_len = max(hold_len, length)
+    if hold_len == 0:
+        return buffer, ""
+    return buffer[:-hold_len], buffer[-hold_len:]
+
+
 def _compute_prefill_delay(config: ServerConfig, prompt_tokens: int) -> float:
     """Prefill delay in seconds based on mode."""
     if config.mode == "decode":
@@ -783,38 +816,65 @@ async def _stream_chat(
         )
         yield f"data: {chunk.model_dump_json()}\n\n"
 
-        # Content chunks (per character as token proxy)
-        emitted = ""
+        # Content chunks with stop sequence buffering
+        stop_seqs = ([req.stop] if isinstance(req.stop, str) else req.stop) if req.stop else []
+        buffer = ""
+        stopped = False
+        emitted_count = 0
         for char in text:
-            emitted += char
-            # Check stop sequences
-            if req.stop:
-                _, was_stopped = _check_stop_sequences(emitted, req.stop)
+            buffer += char
+            if stop_seqs:
+                _, was_stopped = _check_stop_sequences(buffer, stop_seqs)
                 if was_stopped:
                     finish_reason = "stop"
+                    stopped = True
                     break
+                if _is_prefix_of_any_stop(buffer, stop_seqs):
+                    continue
+            for emit_char in buffer:
+                emitted_count += 1
+                await asyncio.sleep(decode_delay)
+                chunk_lp = None
+                if req.logprobs and req.top_logprobs and req.top_logprobs > 0:
+                    chunk_lp = generate_chat_logprobs([emit_char], req.top_logprobs)
+                chunk = ChatCompletionChunk(
+                    id=req_id,
+                    created=created,
+                    model=config.model_name,
+                    choices=[
+                        StreamChoice(
+                            index=idx,
+                            delta=DeltaMessage(content=emit_char),
+                            logprobs=chunk_lp,
+                        )
+                    ],
+                    system_fingerprint=SYSTEM_FINGERPRINT,
+                )
+                yield f"data: {chunk.model_dump_json()}\n\n"
+            buffer = ""
+        if not stopped:
+            for emit_char in buffer:
+                emitted_count += 1
+                await asyncio.sleep(decode_delay)
+                chunk_lp = None
+                if req.logprobs and req.top_logprobs and req.top_logprobs > 0:
+                    chunk_lp = generate_chat_logprobs([emit_char], req.top_logprobs)
+                chunk = ChatCompletionChunk(
+                    id=req_id,
+                    created=created,
+                    model=config.model_name,
+                    choices=[
+                        StreamChoice(
+                            index=idx,
+                            delta=DeltaMessage(content=emit_char),
+                            logprobs=chunk_lp,
+                        )
+                    ],
+                    system_fingerprint=SYSTEM_FINGERPRINT,
+                )
+                yield f"data: {chunk.model_dump_json()}\n\n"
 
-            await asyncio.sleep(decode_delay)
-            # Generate per-token logprobs for chat streaming
-            chunk_lp = None
-            if req.logprobs and req.top_logprobs and req.top_logprobs > 0:
-                chunk_lp = generate_chat_logprobs([char], req.top_logprobs)
-            chunk = ChatCompletionChunk(
-                id=req_id,
-                created=created,
-                model=config.model_name,
-                choices=[
-                    StreamChoice(
-                        index=idx,
-                        delta=DeltaMessage(content=char),
-                        logprobs=chunk_lp,
-                    )
-                ],
-                system_fingerprint=SYSTEM_FINGERPRINT,
-            )
-            yield f"data: {chunk.model_dump_json()}\n\n"
-
-        total_completion += len(emitted)
+        total_completion += emitted_count
 
         # Finish chunk
         chunk = ChatCompletionChunk(
@@ -876,35 +936,65 @@ async def _stream_completion(
         )
         text = render_dummy_text(num_tokens)
 
-        emitted = ""
+        stop_seqs = ([req.stop] if isinstance(req.stop, str) else req.stop) if req.stop else []
+        buffer = ""
+        stopped = False
         for char in text:
-            emitted += char
-            if req.stop:
-                _, was_stopped = _check_stop_sequences(emitted, req.stop)
+            buffer += char
+            # Check if buffer contains a complete stop sequence
+            if stop_seqs:
+                _, was_stopped = _check_stop_sequences(buffer, stop_seqs)
                 if was_stopped:
                     finish_reason = "stop"
+                    stopped = True
                     break
+                # Check if buffer tail might be a stop prefix — hold it back
+                if _is_prefix_of_any_stop(buffer, stop_seqs):
+                    continue
+            # Emit all safe characters from buffer
+            for emit_char in buffer:
+                await asyncio.sleep(decode_delay)
+                chunk_lp = None
+                if req.logprobs is not None and req.logprobs > 0:
+                    chunk_lp = generate_completion_logprobs([emit_char], req.logprobs)
+                chunk = CompletionChunk(
+                    id=req_id,
+                    created=created,
+                    model=config.model_name,
+                    choices=[
+                        CompletionStreamChoice(
+                            index=idx,
+                            text=emit_char,
+                            logprobs=chunk_lp,
+                        )
+                    ],
+                    system_fingerprint=SYSTEM_FINGERPRINT,
+                )
+                yield f"data: {chunk.model_dump_json()}\n\n"
+            buffer = ""
+        # Flush remaining buffer if no stop was hit
+        if not stopped:
+            for emit_char in buffer:
+                await asyncio.sleep(decode_delay)
+                chunk_lp = None
+                if req.logprobs is not None and req.logprobs > 0:
+                    chunk_lp = generate_completion_logprobs([emit_char], req.logprobs)
+                chunk = CompletionChunk(
+                    id=req_id,
+                    created=created,
+                    model=config.model_name,
+                    choices=[
+                        CompletionStreamChoice(
+                            index=idx,
+                            text=emit_char,
+                            logprobs=chunk_lp,
+                        )
+                    ],
+                    system_fingerprint=SYSTEM_FINGERPRINT,
+                )
+                yield f"data: {chunk.model_dump_json()}\n\n"
 
-            await asyncio.sleep(decode_delay)
-            chunk_lp = None
-            if req.logprobs is not None and req.logprobs > 0:
-                chunk_lp = generate_completion_logprobs([char], req.logprobs)
-            chunk = CompletionChunk(
-                id=req_id,
-                created=created,
-                model=config.model_name,
-                choices=[
-                    CompletionStreamChoice(
-                        index=idx,
-                        text=char,
-                        logprobs=chunk_lp,
-                    )
-                ],
-                system_fingerprint=SYSTEM_FINGERPRINT,
-            )
-            yield f"data: {chunk.model_dump_json()}\n\n"
-
-        total_completion += len(emitted)
+        total_completion += len(text) - len(buffer)  # chars actually emitted
 
         # Finish chunk
         chunk = CompletionChunk(

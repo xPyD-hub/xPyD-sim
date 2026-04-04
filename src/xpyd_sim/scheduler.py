@@ -62,14 +62,23 @@ class InferenceRequest:
 
     def _compute_output_length(self) -> None:
         mt = self.max_tokens
-        if self.ignore_eos or mt <= 1:
+        if self.ignore_eos:
             self.target_output_tokens = mt
             self.finish_reason = "length"
+            return
+        if mt <= 1:
+            self.target_output_tokens = mt
+            self.finish_reason = (
+                "stop" if random.random() < self.eos_min_ratio else "length"
+            )
             return
         min_len = max(1, math.ceil(mt * self.eos_min_ratio))
         actual = random.randint(min_len, mt)
         if actual < mt:
             self.target_output_tokens = actual
+            self.finish_reason = "stop"
+        elif random.random() < (1.0 - self.eos_min_ratio):
+            self.target_output_tokens = mt
             self.finish_reason = "stop"
         else:
             self.target_output_tokens = mt

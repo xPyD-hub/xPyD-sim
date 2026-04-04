@@ -5,7 +5,7 @@
 - Helper functions (token counting, ID generation, dummy text)
 - Basic test suite for models and helpers
 
-## M2: Prefill Node Simulator ⬜
+## M2: Prefill Node Simulator ✅
 - FastAPI app for prefill node
 - /v1/completions, /v1/chat/completions, /v1/models, /health
 - Configurable prefill delay (per-token or fixed)

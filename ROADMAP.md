@@ -16,7 +16,7 @@ Based on [DESIGN.md](docs/DESIGN.md). Finite loop — complete when all 56 test 
 - EOS simulation (random output length, eos_min_ratio, ignore_eos)
 - TC1.x, TC2.x, TC3.x, TC4.x, TC5.x, TC6.x
 
-## M3: Parameter Handling + Response Compliance ⬜
+## M3: Parameter Handling + Response Compliance ✅
 - Parameter type validation (400 on wrong types)
 - Logprobs data generation (fake but spec-compliant)
 - Stop sequence truncation

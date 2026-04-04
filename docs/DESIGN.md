@@ -79,6 +79,43 @@ decode:
 
 Minimum 3 points per curve, recommended 5 for better accuracy.
 
+### Decode Delay: 1D vs 2D Fitting
+
+Decode speed depends on two factors:
+1. **Batch size** — more concurrent requests = slower per token
+2. **Context length** — longer KV cache = slower attention
+
+**Simple mode (1D):** Fit decode delay as a function of batch_size only. Sufficient for most scenarios. Requires 3-5 sample points.
+
+```yaml
+decode:
+  - batch_size: 1,     delay_per_token_ms: 8
+  - batch_size: 16,    delay_per_token_ms: 10
+  - batch_size: 64,    delay_per_token_ms: 15
+```
+
+**Precise mode (2D):** Fit decode delay as a function of (batch_size, context_length). For high-accuracy simulation. Requires minimum 9 points (3×3 grid), recommended 16 (4×4).
+
+```yaml
+decode_2d:
+  - batch_size: 1,   context_length: 512,   delay_per_token_ms: 7
+  - batch_size: 1,   context_length: 2048,  delay_per_token_ms: 9
+  - batch_size: 1,   context_length: 8192,  delay_per_token_ms: 14
+  - batch_size: 16,  context_length: 512,   delay_per_token_ms: 9
+  - batch_size: 16,  context_length: 2048,  delay_per_token_ms: 12
+  - batch_size: 16,  context_length: 8192,  delay_per_token_ms: 18
+  - batch_size: 64,  context_length: 512,   delay_per_token_ms: 14
+  - batch_size: 64,  context_length: 2048,  delay_per_token_ms: 19
+  - batch_size: 64,  context_length: 8192,  delay_per_token_ms: 30
+```
+
+The calibrate tool auto-detects which mode based on input data:
+- If only `batch_size` + `delay` columns → 1D fit
+- If `batch_size` + `context_length` + `delay` columns → 2D fit (using scipy griddata or RBF)
+
+During runtime, in 2D mode, context_length grows as tokens are generated (context = input_tokens + generated_so_far), so decode delay naturally increases over the generation — this is realistic.
+
+
 ### Calibrate Tool
 
 ```bash

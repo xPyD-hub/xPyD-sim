@@ -393,3 +393,77 @@ The ultimate validation: xPyD-sim must be a drop-in replacement for both existin
 | TC12.2 | Replace bench's dummy server with xpyd-sim, run all bench tests | All bench tests pass |
 
 These tests ensure xpyd-sim is fully backward compatible. If any test fails, it indicates a gap in xpyd-sim that must be fixed before the migration is complete.
+
+## Scheduling & Batching (Critical)
+
+The simulator must model realistic scheduling behavior — requests compete for resources, affecting each other's latency.
+
+### Prefill Scheduling
+
+Constraints:
+- `max_model_len` — max input sequence length for a single request
+- `max_num_batched_tokens` — max total tokens in one prefill batch
+
+Behavior:
+- Incoming request → check if adding it to current batch exceeds `max_num_batched_tokens`
+- If fits → add to batch
+- If doesn't fit → queue until current batch completes
+- Each prefill batch processes all its requests together; delay = f(total_batch_tokens)
+- After prefill, requests move to decode phase
+
+Simplifications:
+- **No prefix caching** — every request does full prefill
+- **No chunked prefill** — each request's prefill completes in one iteration
+
+### Decode Dynamic Batching
+
+Decode batch membership changes dynamically:
+- **Batch in**: request finishes prefill (or KV transfer) → joins decode batch
+- **Batch out**: request hits EOS or max_tokens → leaves decode batch
+- Batch size fluctuates over time
+
+Behavior:
+- Simulator maintains an active decode batch
+- Each decode iteration: generate one token for every request in the batch
+- Per-token delay = f(current_batch_size, context_length) from 2D profile
+- As requests join/leave, batch size changes → delay changes for ALL requests
+- Context length grows each iteration (input_tokens + generated_so_far)
+
+### Engine Loop
+
+The simulator runs an event-driven engine loop (similar to vLLM):
+
+```
+while True:
+    1. Check prefill queue → form batch up to max_num_batched_tokens
+    2. Run prefill batch → compute delay based on batch total tokens
+    3. Move completed prefill requests to decode batch
+    4. Run one decode step for all requests in decode batch
+       → delay = f(current_batch_size, avg_context_length)
+    5. Check for completed requests (EOS / max_tokens) → remove from batch, send response
+    6. Stream tokens for active requests
+```
+
+This means requests are NOT independent — a burst of new requests increases batch size, slowing down decode for everyone. This is realistic.
+
+### Configuration
+
+```yaml
+scheduling:
+  max_model_len: 131072
+  max_num_batched_tokens: 8192
+```
+
+### Additional Test Cases
+
+| ID | Test | Expected |
+|---|---|---|
+| TC13.1 | Prefill queue: request exceeds max_num_batched_tokens | Request queued, processed in next batch |
+| TC13.2 | Prefill batch: multiple requests fit in one batch | All processed together, shared prefill delay |
+| TC13.3 | Decode dynamic batch in | New request joining increases batch size, slows all |
+| TC13.4 | Decode dynamic batch out | Request completing decreases batch size, speeds up rest |
+| TC13.5 | Decode delay changes with batch size | Verify delay matches 2D profile at current (batch_size, context_length) |
+| TC13.6 | Context length grows during decode | Later tokens slower than earlier tokens |
+| TC13.7 | High concurrency: many requests compete | Realistic throughput degradation |
+| TC13.8 | Single request (batch_size=1) | Fastest possible decode speed |
+| TC13.9 | max_model_len exceeded | Request rejected with error |

@@ -7,7 +7,7 @@ Based on [DESIGN.md](docs/DESIGN.md). Finite loop — complete when all 56 test 
 - Helper functions (token counting, ID generation, dummy text)
 - Basic test suite for models and helpers
 
-## M2: Core Server — Unified Engine ⬜
+## M2: Core Server — Unified Engine ✅
 - Single FastAPI server with mode config (dual/prefill/decode)
 - Three latency parameters: prefill delay, KV transfer delay, decode delay
 - Simple mode: fixed latency values

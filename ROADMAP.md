@@ -46,7 +46,7 @@ Based on [DESIGN.md](docs/DESIGN.md). Finite loop — complete when all 56 test 
 - Warm-up simulation
 - TC10.x
 
-## M7: End-to-End + Concurrency ⬜
+## M7: End-to-End + Concurrency ✅
 - Test with xPyD-proxy (PD disaggregation flow)
 - TTFT/TPOT validation
 - Concurrent request handling

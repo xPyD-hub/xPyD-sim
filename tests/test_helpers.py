@@ -1,7 +1,11 @@
 """Test helper functions."""
 
 from xpyd_sim.common.helpers import (
-    count_prompt_tokens, generate_id, get_effective_max_tokens, now_ts, render_dummy_text,
+    count_prompt_tokens,
+    generate_id,
+    get_effective_max_tokens,
+    now_ts,
+    render_dummy_text,
 )
 from xpyd_sim.common.models import ChatMessage
 

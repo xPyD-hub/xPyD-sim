@@ -27,7 +27,10 @@ def get_effective_max_tokens(*values: Optional[int]) -> int:
 
 def count_prompt_tokens(prompt: Any = None, messages: list | None = None) -> int:
     if messages is not None:
-        total = sum(len(str(getattr(m, "content", ""))) + len(getattr(m, "role", "")) for m in messages)
+        total = sum(
+            len(str(getattr(m, "content", ""))) + len(getattr(m, "role", ""))
+            for m in messages
+        )
         return max(1, total // 4)
     if prompt is None:
         return 1

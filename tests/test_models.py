@@ -1,10 +1,20 @@
 """Test request/response models."""
 
 from xpyd_sim.common.models import (
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
-    ChatMessage, Choice, ChoiceMessage, CompletionChoice, CompletionRequest,
-    CompletionResponse, DeltaMessage, ModelCard, ModelListResponse,
-    StreamChoice, UsageInfo,
+    ChatCompletionChunk,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatMessage,
+    Choice,
+    ChoiceMessage,
+    CompletionChoice,
+    CompletionRequest,
+    CompletionResponse,
+    DeltaMessage,
+    ModelCard,
+    ModelListResponse,
+    StreamChoice,
+    UsageInfo,
 )
 
 

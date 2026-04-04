@@ -510,7 +510,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
                 lp = None
                 if req.logprobs is not None and req.logprobs > 0:
-                    tokens = list(output_text) if output_text else [""]
+                    tokens = tokenize_text(output_text) if output_text else [""]
                     lp = generate_completion_logprobs(tokens, req.logprobs)
                 choices.append(
                     CompletionChoice(

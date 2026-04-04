@@ -230,3 +230,123 @@ Real GPUs have cold-start overhead (CUDA kernel compilation, etc.). Configurable
 | TC10.2 | Request logging | JSONL file with correct fields |
 | TC10.3 | /health with mode info | Returns mode and config |
 | TC10.4 | Warm-up behavior | First N requests have extra latency |
+
+## Additional Features
+
+### /ping Endpoint
+
+Simple health probe compatible with xPyD-proxy:
+```
+GET /ping → "pong"
+POST /ping → "pong"
+```
+
+### Model Card with max_model_len
+
+`/v1/models` response includes `max_model_len` field:
+```json
+{"id": "dummy", "object": "model", "created": 1234, "owned_by": "xpyd-sim", "max_model_len": 131072}
+```
+
+Configurable via `--max-model-len` or YAML.
+
+### Parameter Type Validation
+
+When a parameter has the wrong type (e.g., temperature="abc" instead of float), return HTTP 400 with a clear error message instead of 500. Use Pydantic model validation to enforce this.
+
+### Logprobs Data Generation
+
+When `logprobs` is requested, return realistic-looking (but fake) logprobs data:
+
+For /v1/completions (`logprobs=N`):
+```json
+{
+  "logprobs": {
+    "tokens": ["The"],
+    "token_logprobs": [-0.5],
+    "top_logprobs": [{"The": -0.5, "A": -1.2, "In": -2.0}]
+  }
+}
+```
+
+For /v1/chat/completions (`logprobs=true, top_logprobs=N`):
+```json
+{
+  "logprobs": {
+    "content": [{"token": "The", "logprob": -0.5, "top_logprobs": [{"token": "The", "logprob": -0.5}, {"token": "A", "logprob": -1.2}]}]
+  }
+}
+```
+
+Data is randomly generated but format is spec-compliant.
+
+### Stop Sequence Truncation
+
+When `stop` parameter is provided, the simulator actually truncates output:
+- During generation, check if output contains any stop sequence
+- If found: truncate at that point, set `finish_reason: "stop"`
+- Works in both streaming and non-streaming modes
+- In streaming mode, stop checking happens per-chunk
+
+### CLI and YAML Configuration
+
+All configuration can be provided via CLI arguments or YAML config file. CLI args take precedence over YAML.
+
+**CLI:**
+```bash
+xpyd-sim --mode dual \
+  --port 8000 \
+  --model "my-model" \
+  --prefill-delay-ms 50 \
+  --kv-transfer-delay-ms 5 \
+  --decode-delay-per-token-ms 10 \
+  --eos-min-ratio 0.5 \
+  --max-model-len 131072 \
+  --warmup-requests 3 \
+  --warmup-penalty-ms 200 \
+  --log-requests requests.jsonl \
+  --profile profile.yaml
+```
+
+**YAML (`--config config.yaml`):**
+```yaml
+mode: dual
+port: 8000
+model: my-model
+max_model_len: 131072
+
+latency:
+  prefill_delay_ms: 50
+  kv_transfer_delay_ms: 5
+  decode_delay_per_token_ms: 10
+
+eos:
+  min_ratio: 0.5
+  # ignore_eos is per-request, not server config
+
+warmup:
+  requests: 3
+  penalty_ms: 200
+
+logging:
+  request_log: requests.jsonl
+
+# Optional: use calibrated profile instead of fixed latency
+# profile: profile.yaml
+```
+
+### Additional Test Cases
+
+| ID | Test | Expected |
+|---|---|---|
+| TC11.1 | GET /ping | Returns "pong" |
+| TC11.2 | POST /ping | Returns "pong" |
+| TC11.3 | /v1/models includes max_model_len | Field present with configured value |
+| TC11.4 | Invalid param type (temperature="abc") | HTTP 400 with error message |
+| TC11.5 | logprobs=5 on /v1/completions | Returns fake logprobs data in correct format |
+| TC11.6 | logprobs=true, top_logprobs=3 on chat | Returns fake logprobs in chat format |
+| TC11.7 | stop=["end"] triggers truncation | Output truncated, finish_reason="stop" |
+| TC11.8 | stop in streaming mode | Stream ends at stop sequence |
+| TC11.9 | CLI args override YAML config | CLI takes precedence |
+| TC11.10 | YAML-only config | All settings applied from YAML |
+| TC11.11 | No config (all defaults) | Server starts with sensible defaults |

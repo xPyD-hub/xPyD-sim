@@ -18,6 +18,11 @@ from xpyd_sim.common.helpers import (
     now_ts,
     render_dummy_text,
 )
+from xpyd_sim.common.logprobs import (
+    generate_chat_logprobs,
+    generate_completion_logprobs,
+    tokenize_text,
+)
 from xpyd_sim.common.models import (
     ChatCompletionChunk,
     ChatCompletionRequest,
@@ -209,12 +214,16 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 finish_reason = "stop"
                 num_tokens = max(1, len(text) // 4)
             total_completion += num_tokens
+            lp_data = None
+            if req.logprobs:
+                top_n = req.top_logprobs or 5
+                lp_data = generate_chat_logprobs(tokenize_text(text), top_n)
             choices.append(
                 Choice(
                     index=i,
                     message=ChoiceMessage(role="assistant", content=text),
                     finish_reason=finish_reason,
-                    logprobs=None,
+                    logprobs=lp_data,
                 )
             )
 
@@ -283,12 +292,16 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 finish_reason = "stop"
                 num_tokens = max(1, len(text) // 4)
             total_completion += num_tokens
+            lp = None
+            if req.logprobs is not None and req.logprobs > 0:
+                tokens = list(text) if text else [""]
+                lp = generate_completion_logprobs(tokens, req.logprobs)
             choices.append(
                 CompletionChoice(
                     index=i,
                     text=text,
                     finish_reason=finish_reason,
-                    logprobs=None,
+                    logprobs=lp,
                 )
             )
 
@@ -361,6 +374,10 @@ async def _stream_chat(
                     break
 
             await asyncio.sleep(decode_delay)
+            # Generate per-token logprobs for chat streaming
+            chunk_lp = None
+            if req.logprobs and req.top_logprobs and req.top_logprobs > 0:
+                chunk_lp = generate_chat_logprobs([char], req.top_logprobs)
             chunk = ChatCompletionChunk(
                 id=req_id,
                 created=created,
@@ -369,7 +386,7 @@ async def _stream_chat(
                     StreamChoice(
                         index=idx,
                         delta=DeltaMessage(content=char),
-                        logprobs=None,
+                        logprobs=chunk_lp,
                     )
                 ],
                 system_fingerprint=SYSTEM_FINGERPRINT,
@@ -445,6 +462,9 @@ async def _stream_completion(
                     break
 
             await asyncio.sleep(decode_delay)
+            chunk_lp = None
+            if req.logprobs is not None and req.logprobs > 0:
+                chunk_lp = generate_completion_logprobs([char], req.logprobs)
             chunk = CompletionChunk(
                 id=req_id,
                 created=created,
@@ -453,7 +473,7 @@ async def _stream_completion(
                     CompletionStreamChoice(
                         index=idx,
                         text=char,
-                        logprobs=None,
+                        logprobs=chunk_lp,
                     )
                 ],
                 system_fingerprint=SYSTEM_FINGERPRINT,

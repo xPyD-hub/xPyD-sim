@@ -32,7 +32,7 @@ Based on [DESIGN.md](docs/DESIGN.md). Finite loop — complete when all 56 test 
 - Environment variable fallbacks
 - TC11.9, TC11.10, TC11.11
 
-## M5: Calibrate Tool + Profile Mode ⬜
+## M5: Calibrate Tool + Profile Mode ✅
 - xpyd-sim calibrate command
 - Load sample points, fit curves (scipy)
 - Generate profile.yaml + visualization PNG

@@ -52,7 +52,7 @@ Based on [DESIGN.md](docs/DESIGN.md). Finite loop — complete when all 56 test 
 - Concurrent request handling
 - TC8.x, TC9.x
 
-## M8: Backward Compatibility ⬜
+## M8: Backward Compatibility ✅
 - Replace proxy dummy_nodes with xpyd-sim, all proxy tests pass
 - Replace bench dummy server with xpyd-sim, all bench tests pass
 - TC12.1, TC12.2

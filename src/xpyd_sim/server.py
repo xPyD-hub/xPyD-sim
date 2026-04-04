@@ -40,6 +40,7 @@ from xpyd_sim.common.models import (
     StreamChoice,
     UsageInfo,
 )
+from xpyd_sim.profile import LatencyProfile
 
 SYSTEM_FINGERPRINT = "fp_xpyd_sim"
 
@@ -60,6 +61,12 @@ class ServerConfig:
     warmup_penalty_ms: float = 0.0
     log_requests: str | None = None
     profile: str | None = None
+    _latency_profile: LatencyProfile | None = None
+
+    def load_profile(self) -> None:
+        """Load latency profile if configured."""
+        if self.profile:
+            self._latency_profile = LatencyProfile(self.profile)
 
 
 def _compute_output_length(
@@ -99,21 +106,32 @@ def _compute_prefill_delay(config: ServerConfig, prompt_tokens: int) -> float:
     """Prefill delay in seconds based on mode."""
     if config.mode == "decode":
         return 0.0
+    if config._latency_profile and config._latency_profile.has_prefill:
+        return config._latency_profile.prefill_delay_ms(prompt_tokens) / 1000.0
     return config.prefill_delay_ms / 1000.0
 
 
-def _compute_kv_delay(config: ServerConfig) -> float:
+def _compute_kv_delay(config: ServerConfig, prompt_tokens: int = 0) -> float:
     """KV transfer delay in seconds based on mode."""
     if config.mode == "dual":
         return 0.0  # local, no transfer
     if config.mode == "prefill":
         return 0.0  # prefill doesn't wait for KV
     # decode mode: wait for KV
+    if config._latency_profile and config._latency_profile.has_kv_transfer:
+        return config._latency_profile.kv_transfer_delay_ms(prompt_tokens) / 1000.0
     return config.kv_transfer_delay_ms / 1000.0
 
 
-def _compute_decode_delay(config: ServerConfig) -> float:
+def _compute_decode_delay(
+    config: ServerConfig, batch_size: int = 1, context_length: int = 512,
+) -> float:
     """Per-token decode delay in seconds."""
+    if config._latency_profile and config._latency_profile.has_decode:
+        delay_ms = config._latency_profile.decode_delay_per_token_ms(
+            batch_size, context_length,
+        )
+        return delay_ms / 1000.0
     return config.decode_delay_per_token_ms / 1000.0
 
 
@@ -121,6 +139,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     """Create the unified xPyD-sim FastAPI application."""
     if config is None:
         config = ServerConfig()
+    config.load_profile()
 
     app = FastAPI(title="xPyD-sim")
     app.state.config = config
@@ -196,7 +215,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
         # Simulate prefill + KV transfer
         prefill_delay = _compute_prefill_delay(config, prompt_tokens)
-        kv_delay = _compute_kv_delay(config)
+        kv_delay = _compute_kv_delay(config, prompt_tokens)
         await asyncio.sleep(prefill_delay + kv_delay)
 
         if req.stream:
@@ -274,7 +293,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
         # Simulate prefill + KV transfer
         prefill_delay = _compute_prefill_delay(config, prompt_tokens)
-        kv_delay = _compute_kv_delay(config)
+        kv_delay = _compute_kv_delay(config, prompt_tokens)
         await asyncio.sleep(prefill_delay + kv_delay)
 
         if req.stream:

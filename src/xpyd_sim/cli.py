@@ -186,9 +186,21 @@ def main(argv: list[str] | None = None) -> None:
     serve.add_argument("--config", type=str, default=None, help="YAML config file path",
                        action=_TrackAction)
 
+    # Calibrate subcommand
+    cal = sub.add_parser("calibrate", help="Fit latency curves from sample data")
+    cal.add_argument("--input", required=True, help="Path to sample points YAML")
+    cal.add_argument("--output", required=True, help="Path to write profile YAML")
+    cal.add_argument("--plot", default=None, help="Path to write visualization PNG")
+
     args = parser.parse_args(argv, namespace=_TrackingNamespace())
     if not args.command:
         parser.print_help()
+        return
+
+    if args.command == "calibrate":
+        from xpyd_sim.calibrate import calibrate
+
+        calibrate(args.input, args.output, args.plot)
         return
 
     if args.command == "serve":

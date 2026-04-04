@@ -501,14 +501,21 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     num_tokens = max(1, len(text.split()))
                 total_completion += num_tokens
                 max_choice_tokens = max(max_choice_tokens, num_tokens)
+
+                # echo=True: prepend prompt text to output
+                output_text = text
+                if req.echo:
+                    prompt_str = req.prompt if isinstance(req.prompt, str) else str(req.prompt)
+                    output_text = prompt_str + text
+
                 lp = None
                 if req.logprobs is not None and req.logprobs > 0:
-                    tokens = list(text) if text else [""]
+                    tokens = list(output_text) if output_text else [""]
                     lp = generate_completion_logprobs(tokens, req.logprobs)
                 choices.append(
                     CompletionChoice(
                         index=i,
-                        text=text,
+                        text=output_text,
                         finish_reason=finish_reason,
                         logprobs=lp,
                     )
@@ -888,6 +895,24 @@ async def _stream_completion(
             max_tokens, config.eos_min_ratio, ignore_eos
         )
         text = render_dummy_text(num_tokens)
+
+        # echo=True: emit prompt text first
+        if req.echo:
+            prompt_str = req.prompt if isinstance(req.prompt, str) else str(req.prompt)
+            echo_chunk = CompletionChunk(
+                id=req_id,
+                created=created,
+                model=config.model_name,
+                choices=[
+                    CompletionStreamChoice(
+                        index=idx,
+                        text=prompt_str,
+                        logprobs=None,
+                    )
+                ],
+                system_fingerprint=SYSTEM_FINGERPRINT,
+            )
+            yield f"data: {echo_chunk.model_dump_json()}\n\n"
 
         tokens = text.split(" ") if text else []
         emitted = ""

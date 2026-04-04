@@ -326,7 +326,7 @@ class Scheduler:
         for req in queue:
             if req.input_tokens > self.config.max_model_len:
                 # Reject: signal error via token queue
-                asyncio.get_event_loop().call_soon(
+                asyncio.get_running_loop().call_soon(
                     lambda r=req: r.token_queue.put_nowait(
                         (
                             "error",
@@ -335,7 +335,7 @@ class Scheduler:
                         )
                     )
                 )
-                asyncio.get_event_loop().call_soon(lambda r=req: r.done_event.set())
+                asyncio.get_running_loop().call_soon(lambda r=req: r.done_event.set())
                 continue
             if current_tokens + req.input_tokens > self.config.max_num_batched_tokens:
                 remaining.append(req)

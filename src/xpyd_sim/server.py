@@ -116,12 +116,17 @@ def _compute_output_length(
     ignore_eos: bool,
 ) -> tuple[int, str]:
     """Return (num_tokens, finish_reason)."""
-    if ignore_eos or max_tokens <= 1:
+    if ignore_eos:
         return max_tokens, "length"
+    if max_tokens <= 1:
+        return max_tokens, "stop" if random.random() < eos_min_ratio else "length"
     min_len = max(1, math.ceil(max_tokens * eos_min_ratio))
     actual = random.randint(min_len, max_tokens)
     if actual < max_tokens:
         return actual, "stop"
+    # Even at max_tokens, there's a chance EOS lands on the last token
+    if random.random() < (1.0 - eos_min_ratio):
+        return max_tokens, "stop"
     return max_tokens, "length"
 
 
@@ -371,6 +376,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             # Non-streaming
             choices = []
             total_completion = 0
+            max_choice_tokens = 0
             for i in range(n):
                 num_tokens, finish_reason = _compute_output_length(
                     max_tokens, config.eos_min_ratio, ignore_eos
@@ -379,8 +385,9 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 text, stopped = _check_stop_sequences(text, req.stop)
                 if stopped:
                     finish_reason = "stop"
-                    num_tokens = max(1, len(text) // 4)
+                    num_tokens = max(1, len(text.split()))
                 total_completion += num_tokens
+                max_choice_tokens = max(max_choice_tokens, num_tokens)
                 lp_data = None
                 if req.logprobs:
                     top_n = req.top_logprobs or 5
@@ -394,9 +401,9 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     )
                 )
 
-            # Simulate decode delay
+            # Simulate decode delay (parallel across n choices)
             decode_delay = _compute_decode_delay(config)
-            await asyncio.sleep(decode_delay * total_completion)
+            await asyncio.sleep(decode_delay * max_choice_tokens)
 
             # Update metrics
             config._metrics.inc_tokens(total_completion)
@@ -409,7 +416,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 output_tokens=total_completion,
                 prefill_ms=prefill_delay * 1000,
                 kv_transfer_ms=kv_delay * 1000,
-                decode_ms=decode_delay * total_completion * 1000,
+                decode_ms=decode_delay * max_choice_tokens * 1000,
                 total_ms=total_ms,
             )
 
@@ -482,6 +489,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             # Non-streaming
             choices = []
             total_completion = 0
+            max_choice_tokens = 0
             for i in range(n):
                 num_tokens, finish_reason = _compute_output_length(
                     max_tokens, config.eos_min_ratio, ignore_eos
@@ -490,8 +498,9 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 text, stopped = _check_stop_sequences(text, req.stop)
                 if stopped:
                     finish_reason = "stop"
-                    num_tokens = max(1, len(text) // 4)
+                    num_tokens = max(1, len(text.split()))
                 total_completion += num_tokens
+                max_choice_tokens = max(max_choice_tokens, num_tokens)
                 lp = None
                 if req.logprobs is not None and req.logprobs > 0:
                     tokens = list(text) if text else [""]
@@ -505,9 +514,9 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     )
                 )
 
-            # Simulate decode delay
+            # Simulate decode delay (parallel across n choices)
             decode_delay = _compute_decode_delay(config)
-            await asyncio.sleep(decode_delay * total_completion)
+            await asyncio.sleep(decode_delay * max_choice_tokens)
 
             # Update metrics
             config._metrics.inc_tokens(total_completion)
@@ -520,7 +529,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 output_tokens=total_completion,
                 prefill_ms=prefill_delay * 1000,
                 kv_transfer_ms=kv_delay * 1000,
-                decode_ms=decode_delay * total_completion * 1000,
+                decode_ms=decode_delay * max_choice_tokens * 1000,
                 total_ms=total_ms,
             )
 
@@ -590,7 +599,7 @@ async def _non_stream_chat_scheduled(
         num_tokens = inf_req.generated_tokens
         if stopped:
             finish_reason = "stop"
-            num_tokens = max(1, len(text) // 4)
+            num_tokens = max(1, len(text.split()))
         total_completion += num_tokens
 
         lp_data = None
@@ -783,10 +792,13 @@ async def _stream_chat(
         )
         yield f"data: {chunk.model_dump_json()}\n\n"
 
-        # Content chunks (per character as token proxy)
+        # Content chunks (per token)
+        tokens = text.split(" ") if text else []
         emitted = ""
-        for char in text:
-            emitted += char
+        for i, token in enumerate(tokens):
+            if i > 0:
+                emitted += " "
+            emitted += token
             # Check stop sequences
             if req.stop:
                 _, was_stopped = _check_stop_sequences(emitted, req.stop)
@@ -796,9 +808,10 @@ async def _stream_chat(
 
             await asyncio.sleep(decode_delay)
             # Generate per-token logprobs for chat streaming
+            token_text = (" " + token) if i > 0 else token
             chunk_lp = None
             if req.logprobs and req.top_logprobs and req.top_logprobs > 0:
-                chunk_lp = generate_chat_logprobs([char], req.top_logprobs)
+                chunk_lp = generate_chat_logprobs([token_text], req.top_logprobs)
             chunk = ChatCompletionChunk(
                 id=req_id,
                 created=created,
@@ -806,7 +819,7 @@ async def _stream_chat(
                 choices=[
                     StreamChoice(
                         index=idx,
-                        delta=DeltaMessage(content=char),
+                        delta=DeltaMessage(content=token_text),
                         logprobs=chunk_lp,
                     )
                 ],
@@ -814,7 +827,7 @@ async def _stream_chat(
             )
             yield f"data: {chunk.model_dump_json()}\n\n"
 
-        total_completion += len(emitted)
+        total_completion += len(tokens)
 
         # Finish chunk
         chunk = ChatCompletionChunk(
@@ -876,9 +889,12 @@ async def _stream_completion(
         )
         text = render_dummy_text(num_tokens)
 
+        tokens = text.split(" ") if text else []
         emitted = ""
-        for char in text:
-            emitted += char
+        for i, token in enumerate(tokens):
+            if i > 0:
+                emitted += " "
+            emitted += token
             if req.stop:
                 _, was_stopped = _check_stop_sequences(emitted, req.stop)
                 if was_stopped:
@@ -886,9 +902,10 @@ async def _stream_completion(
                     break
 
             await asyncio.sleep(decode_delay)
+            token_text = (" " + token) if i > 0 else token
             chunk_lp = None
             if req.logprobs is not None and req.logprobs > 0:
-                chunk_lp = generate_completion_logprobs([char], req.logprobs)
+                chunk_lp = generate_completion_logprobs([token_text], req.logprobs)
             chunk = CompletionChunk(
                 id=req_id,
                 created=created,
@@ -896,7 +913,7 @@ async def _stream_completion(
                 choices=[
                     CompletionStreamChoice(
                         index=idx,
-                        text=char,
+                        text=token_text,
                         logprobs=chunk_lp,
                     )
                 ],
@@ -904,7 +921,7 @@ async def _stream_completion(
             )
             yield f"data: {chunk.model_dump_json()}\n\n"
 
-        total_completion += len(emitted)
+        total_completion += len(tokens)
 
         # Finish chunk
         chunk = CompletionChunk(

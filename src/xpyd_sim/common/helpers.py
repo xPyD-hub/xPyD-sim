@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-DUMMY_TOKENS = list("The quick brown fox jumps over the lazy dog. " * 20)
+DUMMY_TOKENS = ("The quick brown fox jumps over the lazy dog. " * 20).split()
 DEFAULT_MAX_TOKENS = 16
 
 
@@ -27,10 +27,23 @@ def get_effective_max_tokens(*values: Optional[int]) -> int:
 
 def count_prompt_tokens(prompt: Any = None, messages: list | None = None) -> int:
     if messages is not None:
-        total = sum(
-            len(str(getattr(m, "content", ""))) + len(getattr(m, "role", ""))
-            for m in messages
-        )
+        total = 0
+        for m in messages:
+            content = getattr(m, "content", None)
+            role = getattr(m, "role", "") or ""
+            if content is None:
+                pass
+            elif isinstance(content, str):
+                total += len(content)
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        total += len(part.get("text", ""))
+                    elif isinstance(part, dict):
+                        total += 10
+            else:
+                total += len(str(content))
+            total += len(role)
         return max(1, total // 4)
     if prompt is None:
         return 1
@@ -44,4 +57,4 @@ def count_prompt_tokens(prompt: Any = None, messages: list | None = None) -> int
 
 
 def render_dummy_text(n_tokens: int) -> str:
-    return "".join(DUMMY_TOKENS[: min(n_tokens, len(DUMMY_TOKENS))])
+    return " ".join(DUMMY_TOKENS[: min(n_tokens, len(DUMMY_TOKENS))])

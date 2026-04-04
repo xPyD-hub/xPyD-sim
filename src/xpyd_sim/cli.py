@@ -48,6 +48,16 @@ def _load_yaml_config(path: str | Path) -> dict[str, Any]:
     if "profile" in raw:
         flat["profile"] = raw["profile"]
 
+    # Scheduling section
+    scheduling = raw.get("scheduling", {})
+    for key in ("max_num_batched_tokens", "max_num_seqs"):
+        if key in scheduling:
+            flat[key] = scheduling[key]
+    if "max_model_len" in scheduling:
+        flat["max_model_len"] = scheduling["max_model_len"]
+    if "enabled" in scheduling:
+        flat["scheduling_enabled"] = scheduling["enabled"]
+
     return flat
 
 
@@ -66,6 +76,9 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "warmup_penalty_ms": ("XPYD_SIM_WARMUP_PENALTY_MS", float),
     "log_requests": ("XPYD_SIM_LOG_REQUESTS", str),
     "profile": ("XPYD_SIM_PROFILE", str),
+    "max_num_batched_tokens": ("XPYD_SIM_MAX_NUM_BATCHED_TOKENS", int),
+    "max_num_seqs": ("XPYD_SIM_MAX_NUM_SEQS", int),
+    "scheduling_enabled": ("XPYD_SIM_SCHEDULING_ENABLED", lambda v: v.lower() in ("1", "true")),
 }
 
 # Default values for all config keys
@@ -83,6 +96,9 @@ _DEFAULTS: dict[str, Any] = {
     "warmup_penalty_ms": 0.0,
     "log_requests": None,
     "profile": None,
+    "max_num_batched_tokens": 8192,
+    "max_num_seqs": 256,
+    "scheduling_enabled": False,
 }
 
 
@@ -108,6 +124,9 @@ def _resolve_config(
         "warmup_penalty_ms": "warmup_penalty_ms",
         "log_requests": "log_requests",
         "profile": "profile",
+        "max_num_batched_tokens": "max_num_batched_tokens",
+        "max_num_seqs": "max_num_seqs",
+        "scheduling_enabled": "scheduling_enabled",
     }
 
     for cli_attr, key in cli_to_key.items():
@@ -117,6 +136,9 @@ def _resolve_config(
         # argparse sets unset args to their default — we use None defaults
         # and check _explicitly_set to detect user intent
         explicitly_set = key in getattr(cli_args, "_explicitly_set", set())
+        # For store_true flags like scheduling_enabled, check if truthy
+        if not explicitly_set and key == "scheduling_enabled" and cli_val is True:
+            explicitly_set = True
 
         if explicitly_set:
             result[key] = cli_val
@@ -185,6 +207,10 @@ def main(argv: list[str] | None = None) -> None:
     serve.add_argument("--profile", type=str, default=None, action=_TrackAction)
     serve.add_argument("--config", type=str, default=None, help="YAML config file path",
                        action=_TrackAction)
+    serve.add_argument("--max-num-batched-tokens", type=int, default=8192, action=_TrackAction)
+    serve.add_argument("--max-num-seqs", type=int, default=256, action=_TrackAction)
+    serve.add_argument("--scheduling", action="store_true", default=False,
+                       dest="scheduling_enabled")
 
     # Calibrate subcommand
     cal = sub.add_parser("calibrate", help="Fit latency curves from sample data")
@@ -227,6 +253,9 @@ def main(argv: list[str] | None = None) -> None:
             warmup_penalty_ms=cfg["warmup_penalty_ms"],
             log_requests=cfg["log_requests"],
             profile=cfg["profile"],
+            max_num_batched_tokens=cfg["max_num_batched_tokens"],
+            max_num_seqs=cfg["max_num_seqs"],
+            scheduling_enabled=cfg["scheduling_enabled"],
         )
         app = create_app(config)
         uvicorn.run(app, host=cfg["host"], port=cfg["port"])

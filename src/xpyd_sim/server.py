@@ -6,6 +6,7 @@ import asyncio
 import math
 import random
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 from fastapi import FastAPI, Request
@@ -43,6 +44,7 @@ from xpyd_sim.common.models import (
 )
 from xpyd_sim.observability import Metrics, RequestLogger, WarmupTracker
 from xpyd_sim.profile import LatencyProfile
+from xpyd_sim.scheduler import InferenceRequest, Scheduler, SchedulingConfig
 
 SYSTEM_FINGERPRINT = "fp_xpyd_sim"
 
@@ -63,10 +65,15 @@ class ServerConfig:
     warmup_penalty_ms: float = 0.0
     log_requests: str | None = None
     profile: str | None = None
+    # Scheduling config
+    max_num_batched_tokens: int = 8192
+    max_num_seqs: int = 256
+    scheduling_enabled: bool = False
     _latency_profile: LatencyProfile | None = None
     _metrics: Metrics = field(default_factory=Metrics)
     _request_logger: RequestLogger | None = None
     _warmup_tracker: WarmupTracker | None = None
+    _scheduler: Scheduler | None = None
 
     def load_profile(self) -> None:
         """Load latency profile if configured."""
@@ -78,6 +85,29 @@ class ServerConfig:
         self._metrics = Metrics()
         self._request_logger = RequestLogger(self.log_requests)
         self._warmup_tracker = WarmupTracker(self.warmup_requests, self.warmup_penalty_ms)
+
+    def init_scheduler(self) -> None:
+        """Initialize the scheduler if scheduling is enabled."""
+        if not self.scheduling_enabled:
+            return
+        sched_config = SchedulingConfig(
+            max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_batched_tokens,
+            max_num_seqs=self.max_num_seqs,
+            enabled=True,
+        )
+        log_cb = None
+        if self._request_logger:
+            log_cb = self._request_logger.log
+        self._scheduler = Scheduler(
+            config=sched_config,
+            prefill_delay_ms=self.prefill_delay_ms,
+            kv_transfer_delay_ms=self.kv_transfer_delay_ms,
+            decode_delay_per_token_ms=self.decode_delay_per_token_ms,
+            mode=self.mode,
+            latency_profile=self._latency_profile,
+            log_callback=log_cb,
+        )
 
 
 def _compute_output_length(
@@ -176,8 +206,17 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         config = ServerConfig()
     config.load_profile()
     config.init_observability()
+    config.init_scheduler()
 
-    app = FastAPI(title="xPyD-sim")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if config._scheduler:
+            await config._scheduler.start()
+        yield
+        if config._scheduler:
+            await config._scheduler.stop()
+
+    app = FastAPI(title="xPyD-sim", lifespan=lifespan)
     app.state.config = config
 
     @app.exception_handler(ValidationError)
@@ -207,10 +246,34 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
     @app.get("/metrics")
     async def metrics():
+        extra = ""
+        if config._scheduler:
+            state = config._scheduler.get_batch_state()
+            extra = (
+                f"\n# HELP xpyd_sim_prefill_queue_depth Current prefill queue depth.\n"
+                f"# TYPE xpyd_sim_prefill_queue_depth gauge\n"
+                f"xpyd_sim_prefill_queue_depth {state['prefill_queue_depth']}\n"
+                f"# HELP xpyd_sim_prefill_batch_size Current prefill batch size.\n"
+                f"# TYPE xpyd_sim_prefill_batch_size gauge\n"
+                f"xpyd_sim_prefill_batch_size {state['prefill_batch_size']}\n"
+                f"# HELP xpyd_sim_decode_batch_size Current decode batch size.\n"
+                f"# TYPE xpyd_sim_decode_batch_size gauge\n"
+                f"xpyd_sim_decode_batch_size {state['decode_batch_size']}\n"
+                f"# HELP xpyd_sim_decode_avg_context_length "
+                f"Average context length in decode batch.\n"
+                f"# TYPE xpyd_sim_decode_avg_context_length gauge\n"
+                f"xpyd_sim_decode_avg_context_length {state['decode_avg_context_length']}\n"
+            )
         return PlainTextResponse(
-            config._metrics.render_prometheus(),
+            config._metrics.render_prometheus() + extra,
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
+
+    @app.get("/debug/batch")
+    async def debug_batch():
+        if not config._scheduler:
+            return {"error": "Scheduling not enabled"}
+        return config._scheduler.get_batch_state()
 
     @app.get("/v1/models")
     async def list_models():
@@ -262,6 +325,32 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             max_tokens = get_effective_max_tokens(req.max_completion_tokens, req.max_tokens)
             n = req.n or 1
             ignore_eos = req.ignore_eos or False
+
+            # If scheduling enabled, route through scheduler
+            if config._scheduler:
+                if prompt_tokens > config.max_model_len:
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "error": {
+                                "message": (
+                                    f"Input length {prompt_tokens} exceeds "
+                                    f"max_model_len {config.max_model_len}"
+                                ),
+                                "type": "invalid_request_error",
+                            }
+                        },
+                    )
+                if req.stream:
+                    return StreamingResponse(
+                        _stream_chat_scheduled(
+                            config, req, prompt_tokens, max_tokens, n, ignore_eos,
+                        ),
+                        media_type="text/event-stream",
+                    )
+                return await _non_stream_chat_scheduled(
+                    config, req, prompt_tokens, max_tokens, n, ignore_eos, request_start,
+                )
 
             # Warm-up penalty
             warmup_penalty = config._warmup_tracker.get_penalty() if config._warmup_tracker else 0
@@ -453,6 +542,208 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             config._metrics.observe_duration(duration)
 
     return app
+
+
+async def _non_stream_chat_scheduled(
+    config: ServerConfig,
+    req: ChatCompletionRequest,
+    prompt_tokens: int,
+    max_tokens: int,
+    n: int,
+    ignore_eos: bool,
+    request_start: float,
+) -> JSONResponse:
+    """Handle non-streaming chat completion with scheduler."""
+    scheduler = config._scheduler
+    assert scheduler is not None
+
+    choices = []
+    total_completion = 0
+
+    for i in range(n):
+        inf_req = InferenceRequest(
+            request_id=generate_id("req"),
+            input_tokens=prompt_tokens,
+            max_tokens=max_tokens,
+            eos_min_ratio=config.eos_min_ratio,
+            ignore_eos=ignore_eos,
+        )
+        await scheduler.submit(inf_req)
+        # Wait for completion
+        await inf_req.done_event.wait()
+
+        # Drain token queue
+        tokens_received = 0
+        while not inf_req.token_queue.empty():
+            msg_type, _ = inf_req.token_queue.get_nowait()
+            if msg_type == "token":
+                tokens_received += 1
+            elif msg_type == "error":
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": {"message": _, "type": "invalid_request_error"}},
+                )
+
+        text = render_dummy_text(inf_req.generated_tokens)
+        text, stopped = _check_stop_sequences(text, req.stop)
+        finish_reason = inf_req.finish_reason
+        num_tokens = inf_req.generated_tokens
+        if stopped:
+            finish_reason = "stop"
+            num_tokens = max(1, len(text) // 4)
+        total_completion += num_tokens
+
+        lp_data = None
+        if req.logprobs:
+            top_n = req.top_logprobs or 5
+            lp_data = generate_chat_logprobs(tokenize_text(text), top_n)
+
+        choices.append(
+            Choice(
+                index=i,
+                message=ChoiceMessage(role="assistant", content=text),
+                finish_reason=finish_reason,
+                logprobs=lp_data,
+            )
+        )
+
+    config._metrics.inc_tokens(total_completion)
+
+    resp = ChatCompletionResponse(
+        id=generate_id("chatcmpl"),
+        created=now_ts(),
+        model=config.model_name,
+        choices=choices,
+        usage=UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=total_completion,
+            total_tokens=prompt_tokens + total_completion,
+        ),
+        system_fingerprint=SYSTEM_FINGERPRINT,
+    )
+    return JSONResponse(content=resp.model_dump())
+
+
+async def _stream_chat_scheduled(
+    config: ServerConfig,
+    req: ChatCompletionRequest,
+    prompt_tokens: int,
+    max_tokens: int,
+    n: int,
+    ignore_eos: bool,
+):
+    """Stream chat completion using scheduler for token timing."""
+    scheduler = config._scheduler
+    assert scheduler is not None
+    req_id = generate_id("chatcmpl")
+    created = now_ts()
+    include_usage = req.stream_options.get("include_usage", False) if req.stream_options else False
+    total_completion = 0
+
+    for idx in range(n):
+        inf_req = InferenceRequest(
+            request_id=generate_id("req"),
+            input_tokens=prompt_tokens,
+            max_tokens=max_tokens,
+            eos_min_ratio=config.eos_min_ratio,
+            ignore_eos=ignore_eos,
+        )
+        await scheduler.submit(inf_req)
+
+        # First chunk: role
+        chunk = ChatCompletionChunk(
+            id=req_id,
+            created=created,
+            model=config.model_name,
+            choices=[
+                StreamChoice(
+                    index=idx,
+                    delta=DeltaMessage(role="assistant", content=""),
+                    logprobs=None,
+                )
+            ],
+            system_fingerprint=SYSTEM_FINGERPRINT,
+        )
+        yield f"data: {chunk.model_dump_json()}\n\n"
+
+        # Wait for tokens from scheduler
+        text_so_far = ""
+        while True:
+            msg_type, value = await inf_req.token_queue.get()
+            if msg_type == "error":
+                break
+            if msg_type == "done":
+                break
+            # msg_type == "token"
+            token_idx = value
+            char = render_dummy_text(token_idx)[-1] if token_idx > 0 else "T"
+            text_so_far += char
+
+            # Check stop sequences
+            finish_early = False
+            if req.stop:
+                _, was_stopped = _check_stop_sequences(text_so_far, req.stop)
+                if was_stopped:
+                    finish_early = True
+
+            chunk_lp = None
+            if req.logprobs and req.top_logprobs and req.top_logprobs > 0:
+                chunk_lp = generate_chat_logprobs([char], req.top_logprobs)
+            chunk = ChatCompletionChunk(
+                id=req_id,
+                created=created,
+                model=config.model_name,
+                choices=[
+                    StreamChoice(
+                        index=idx,
+                        delta=DeltaMessage(content=char),
+                        logprobs=chunk_lp,
+                    )
+                ],
+                system_fingerprint=SYSTEM_FINGERPRINT,
+            )
+            yield f"data: {chunk.model_dump_json()}\n\n"
+            total_completion += 1
+
+            if finish_early:
+                break
+
+        # Finish chunk
+        finish_reason = inf_req.finish_reason if inf_req.is_done() else "stop"
+        chunk = ChatCompletionChunk(
+            id=req_id,
+            created=created,
+            model=config.model_name,
+            choices=[
+                StreamChoice(
+                    index=idx,
+                    delta=DeltaMessage(),
+                    finish_reason=finish_reason,
+                    logprobs=None,
+                )
+            ],
+            system_fingerprint=SYSTEM_FINGERPRINT,
+        )
+        yield f"data: {chunk.model_dump_json()}\n\n"
+
+    config._metrics.inc_tokens(total_completion)
+
+    if include_usage:
+        usage_chunk = ChatCompletionChunk(
+            id=req_id,
+            created=created,
+            model=config.model_name,
+            choices=[],
+            system_fingerprint=SYSTEM_FINGERPRINT,
+            usage=UsageInfo(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=total_completion,
+                total_tokens=prompt_tokens + total_completion,
+            ),
+        )
+        yield f"data: {usage_chunk.model_dump_json()}\n\n"
+
+    yield "data: [DONE]\n\n"
 
 
 async def _stream_chat(

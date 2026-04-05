@@ -1,7 +1,8 @@
 """Test tool calling support for vLLM compatibility."""
 import json
-import pytest
+
 from fastapi.testclient import TestClient
+
 from xpyd_sim.server import ServerConfig, create_app
 
 TOOLS = [
@@ -108,8 +109,8 @@ class TestToolCalling:
                 "stream": True,
             })
             assert r.status_code == 200
-            chunks = [json.loads(l[6:]) for l in r.text.split("\n")
-                      if l.startswith("data: ") and l != "data: [DONE]"]
+            chunks = [json.loads(line[6:]) for line in r.text.split("\n")
+                      if line.startswith("data: ") and line != "data: [DONE]"]
             finish_reasons = [c["choices"][0].get("finish_reason") for c in chunks if c["choices"]]
             assert "tool_calls" in finish_reasons
             has_tool_delta = any(

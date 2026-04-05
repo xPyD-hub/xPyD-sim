@@ -57,8 +57,13 @@ SYSTEM_FINGERPRINT = "fp_xpyd_sim"
 
 
 def _build_tool_call_response(req: ChatCompletionRequest):
-    """Build tool call objects and estimate tokens. Returns (tool_call_objects, num_tokens) or None."""
-    if not should_generate_tool_calls(getattr(req, 'tools', None), getattr(req, 'tool_choice', None)):
+    """Build tool call objects and estimate tokens.
+
+    Returns (tool_call_objects, num_tokens) or None.
+    """
+    tools = getattr(req, "tools", None)
+    choice = getattr(req, "tool_choice", None)
+    if not should_generate_tool_calls(tools, choice):
         return None
     tool_calls_data = build_tool_calls(
         req.tools,
@@ -496,7 +501,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     choices.append(
                         Choice(
                             index=i,
-                            message=ChoiceMessage(role="assistant", content=None, tool_calls=tool_call_objects),
+                            message=ChoiceMessage(
+                                role="assistant",
+                                content=None,
+                                tool_calls=tool_call_objects,
+                            ),
                             finish_reason="tool_calls",
                             logprobs=None,
                         )
@@ -742,7 +751,11 @@ async def _non_stream_chat_scheduled(
             choices.append(
                 Choice(
                     index=i,
-                    message=ChoiceMessage(role="assistant", content=None, tool_calls=tool_call_objects),
+                    message=ChoiceMessage(
+                        role="assistant",
+                        content=None,
+                        tool_calls=tool_call_objects,
+                    ),
                     finish_reason="tool_calls",
                     logprobs=None,
                 )
@@ -841,25 +854,48 @@ async def _stream_chat_scheduled(
                     "type": "function",
                     "function": {"name": tc["function"]["name"], "arguments": ""},
                 })
+            sc = StreamChoice(
+                index=idx,
+                delta=DeltaMessage(
+                    role="assistant", tool_calls=tc_deltas,
+                ),
+                logprobs=None,
+            )
             chunk = ChatCompletionChunk(
                 id=req_id, created=created, model=config.model_name,
-                choices=[StreamChoice(index=idx, delta=DeltaMessage(role="assistant", tool_calls=tc_deltas), logprobs=None)],
+                choices=[sc],
                 system_fingerprint=SYSTEM_FINGERPRINT,
             )
             yield f"data: {chunk.model_dump_json()}\n\n"
             arg_deltas = []
             for ti, tc in enumerate(tool_calls_data):
-                arg_deltas.append({"index": ti, "function": {"arguments": tc["function"]["arguments"]}})
+                arg_deltas.append({
+                    "index": ti,
+                    "function": {
+                        "arguments": tc["function"]["arguments"],
+                    },
+                })
+            sc = StreamChoice(
+                index=idx,
+                delta=DeltaMessage(tool_calls=arg_deltas),
+                logprobs=None,
+            )
             chunk = ChatCompletionChunk(
                 id=req_id, created=created, model=config.model_name,
-                choices=[StreamChoice(index=idx, delta=DeltaMessage(tool_calls=arg_deltas), logprobs=None)],
+                choices=[sc],
                 system_fingerprint=SYSTEM_FINGERPRINT,
             )
             yield f"data: {chunk.model_dump_json()}\n\n"
             total_completion += tc_tokens
+            sc = StreamChoice(
+                index=idx,
+                delta=DeltaMessage(),
+                finish_reason="tool_calls",
+                logprobs=None,
+            )
             chunk = ChatCompletionChunk(
                 id=req_id, created=created, model=config.model_name,
-                choices=[StreamChoice(index=idx, delta=DeltaMessage(), finish_reason="tool_calls", logprobs=None)],
+                choices=[sc],
                 system_fingerprint=SYSTEM_FINGERPRINT,
             )
             yield f"data: {chunk.model_dump_json()}\n\n"

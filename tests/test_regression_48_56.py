@@ -489,3 +489,47 @@ class TestCompletionsSchedulerRouting:
             assert "decode_done" in event_types, (
                 f"Missing decode_done, got: {event_types}"
             )
+
+
+# ===================================================================
+# Issue #58 — _form_prefill_batch crashes outside async context
+# ===================================================================
+
+
+class TestSchedulerSyncSafety:
+    """Guard against _form_prefill_batch requiring an active event loop."""
+
+    def test_form_prefill_batch_sync_context(self):
+        """#58: _form_prefill_batch must work without a running event loop.
+
+        The old code used asyncio.get_running_loop().call_soon() which
+        raises RuntimeError in sync contexts. put_nowait() and set()
+        are sync-safe and should be used directly.
+        """
+        from xpyd_sim.scheduler import InferenceRequest, Scheduler, SchedulingConfig
+
+        sched_config = SchedulingConfig(
+            max_model_len=100,
+            max_num_batched_tokens=500,
+            max_num_seqs=10,
+            enabled=True,
+        )
+        scheduler = Scheduler(config=sched_config)
+
+        big_req = InferenceRequest(
+            request_id="big", input_tokens=200, max_tokens=5
+        )
+        small_req = InferenceRequest(
+            request_id="small", input_tokens=50, max_tokens=5
+        )
+
+        # Must NOT raise RuntimeError: no running event loop
+        batch, remaining = scheduler._form_prefill_batch([big_req, small_req])
+
+        # big_req rejected, small_req in batch
+        assert len(batch) == 1
+        assert batch[0].request_id == "small"
+        assert big_req.done_event.is_set()
+        msg_type, msg = big_req.token_queue.get_nowait()
+        assert msg_type == "error"
+        assert "exceeds" in msg

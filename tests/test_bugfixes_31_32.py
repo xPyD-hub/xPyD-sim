@@ -88,11 +88,15 @@ async def test_echo_true_streaming(app):
 
 
 def test_scheduler_no_get_event_loop():
-    """Scheduler should use get_running_loop() not get_event_loop()."""
+    """Scheduler should NOT use deprecated get_event_loop().
+
+    The original #32 fix replaced get_event_loop() with get_running_loop().
+    The #58 fix went further: removed the event-loop dependency entirely
+    by calling put_nowait() and set() directly (they are sync-safe).
+    """
     import inspect
 
     from xpyd_sim import scheduler
 
     source = inspect.getsource(scheduler)
     assert "get_event_loop()" not in source, "Scheduler still uses deprecated get_event_loop()"
-    assert "get_running_loop()" in source

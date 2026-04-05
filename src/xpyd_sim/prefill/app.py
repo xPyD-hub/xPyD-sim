@@ -6,7 +6,7 @@ import asyncio
 from typing import Optional
 
 from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from xpyd_sim.common.helpers import (
     count_prompt_tokens,
@@ -32,8 +32,12 @@ from xpyd_sim.common.models import (
     StreamChoice,
     UsageInfo,
 )
+from xpyd_sim.observability import Metrics
 
 SYSTEM_FINGERPRINT = "fp_xpyd_sim"
+
+# Alias for prefill app metrics
+_PrefillMetrics = Metrics
 
 
 def create_prefill_app(
@@ -49,12 +53,25 @@ def create_prefill_app(
         delay_fixed: Fixed delay in seconds (used if delay_per_token is None).
     """
     app = FastAPI(title="xPyD-sim Prefill Node")
+    metrics = _PrefillMetrics()
 
     async def _simulate_delay(prompt_tokens: int) -> None:
         if delay_per_token is not None:
             await asyncio.sleep(delay_per_token * prompt_tokens)
         elif delay_fixed is not None:
             await asyncio.sleep(delay_fixed)
+
+    @app.get("/ping")
+    @app.post("/ping")
+    async def ping():
+        return PlainTextResponse("pong")
+
+    @app.get("/metrics")
+    async def metrics_endpoint():
+        return PlainTextResponse(
+            metrics.render_prometheus(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
 
     @app.get("/health")
     async def health() -> dict:

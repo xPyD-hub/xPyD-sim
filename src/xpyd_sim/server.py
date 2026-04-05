@@ -331,21 +331,28 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             n = req.n or 1
             ignore_eos = req.ignore_eos or False
 
+            # Enforce max_model_len for all paths
+            if prompt_tokens > config.max_model_len:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "message": (
+                                f"Input length {prompt_tokens} exceeds "
+                                f"max_model_len {config.max_model_len}"
+                            ),
+                            "type": "invalid_request_error",
+                        }
+                    },
+                )
+
+            # Warm-up penalty (applies to all paths)
+            warmup_penalty = config._warmup_tracker.get_penalty() if config._warmup_tracker else 0
+            if warmup_penalty > 0:
+                await asyncio.sleep(warmup_penalty)
+
             # If scheduling enabled, route through scheduler
             if config._scheduler:
-                if prompt_tokens > config.max_model_len:
-                    return JSONResponse(
-                        status_code=400,
-                        content={
-                            "error": {
-                                "message": (
-                                    f"Input length {prompt_tokens} exceeds "
-                                    f"max_model_len {config.max_model_len}"
-                                ),
-                                "type": "invalid_request_error",
-                            }
-                        },
-                    )
                 if req.stream:
                     return StreamingResponse(
                         _stream_chat_scheduled(
@@ -356,11 +363,6 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 return await _non_stream_chat_scheduled(
                     config, req, prompt_tokens, max_tokens, n, ignore_eos, request_start,
                 )
-
-            # Warm-up penalty
-            warmup_penalty = config._warmup_tracker.get_penalty() if config._warmup_tracker else 0
-            if warmup_penalty > 0:
-                await asyncio.sleep(warmup_penalty)
 
             # Simulate prefill + KV transfer
             prefill_delay = _compute_prefill_delay(config, prompt_tokens)
@@ -468,12 +470,40 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             n = req.n or 1
             ignore_eos = req.ignore_eos or False
 
+            # Enforce max_model_len for all paths
+            if prompt_tokens > config.max_model_len:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": {
+                            "message": (
+                                f"Input length {prompt_tokens} exceeds "
+                                f"max_model_len {config.max_model_len}"
+                            ),
+                            "type": "invalid_request_error",
+                        }
+                    },
+                )
+
             # Warm-up penalty
             warmup_penalty = (
                 config._warmup_tracker.get_penalty() if config._warmup_tracker else 0
             )
             if warmup_penalty > 0:
                 await asyncio.sleep(warmup_penalty)
+
+            # If scheduling enabled, route through scheduler
+            if config._scheduler:
+                if req.stream:
+                    return StreamingResponse(
+                        _stream_completion_scheduled(
+                            config, req, prompt_tokens, max_tokens, n, ignore_eos,
+                        ),
+                        media_type="text/event-stream",
+                    )
+                return await _non_stream_completion_scheduled(
+                    config, req, prompt_tokens, max_tokens, n, ignore_eos, request_start,
+                )
 
             # Simulate prefill + KV transfer
             prefill_delay = _compute_prefill_delay(config, prompt_tokens)
@@ -649,6 +679,7 @@ async def _stream_chat_scheduled(
     ignore_eos: bool,
 ):
     """Stream chat completion using scheduler for token timing."""
+    request_start = time.monotonic()
     scheduler = config._scheduler
     assert scheduler is not None
     req_id = generate_id("chatcmpl")
@@ -761,6 +792,225 @@ async def _stream_chat_scheduled(
         )
         yield f"data: {usage_chunk.model_dump_json()}\n\n"
 
+    # Log streaming request
+    total_ms = (time.monotonic() - request_start) * 1000
+    _log_request(
+        config,
+        prompt_tokens=prompt_tokens,
+        output_tokens=total_completion,
+        prefill_ms=0,
+        kv_transfer_ms=0,
+        decode_ms=total_ms,
+        total_ms=total_ms,
+    )
+
+    yield "data: [DONE]\n\n"
+
+
+async def _non_stream_completion_scheduled(
+    config: ServerConfig,
+    req: CompletionRequest,
+    prompt_tokens: int,
+    max_tokens: int,
+    n: int,
+    ignore_eos: bool,
+    request_start: float,
+) -> JSONResponse:
+    """Handle non-streaming completion with scheduler."""
+    scheduler = config._scheduler
+    assert scheduler is not None
+
+    choices = []
+    total_completion = 0
+
+    for i in range(n):
+        inf_req = InferenceRequest(
+            request_id=generate_id("req"),
+            input_tokens=prompt_tokens,
+            max_tokens=max_tokens,
+            eos_min_ratio=config.eos_min_ratio,
+            ignore_eos=ignore_eos,
+        )
+        await scheduler.submit(inf_req)
+        await inf_req.done_event.wait()
+
+        # Drain token queue
+        while not inf_req.token_queue.empty():
+            msg_type, value = inf_req.token_queue.get_nowait()
+            if msg_type == "error":
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": {"message": value, "type": "invalid_request_error"}},
+                )
+
+        text = render_dummy_text(inf_req.generated_tokens)
+        text, stopped = _check_stop_sequences(text, req.stop)
+        finish_reason = inf_req.finish_reason
+        num_tokens = inf_req.generated_tokens
+        if stopped:
+            finish_reason = "stop"
+            num_tokens = max(1, len(text.split()))
+        total_completion += num_tokens
+
+        output_text = text
+        if req.echo:
+            prompt_str = req.prompt if isinstance(req.prompt, str) else str(req.prompt)
+            output_text = prompt_str + text
+
+        lp = None
+        if req.logprobs is not None and req.logprobs > 0:
+            tokens = tokenize_text(output_text) if output_text else [""]
+            lp = generate_completion_logprobs(tokens, req.logprobs)
+
+        choices.append(
+            CompletionChoice(
+                index=i,
+                text=output_text,
+                finish_reason=finish_reason,
+                logprobs=lp,
+            )
+        )
+
+    config._metrics.inc_tokens(total_completion)
+
+    resp = CompletionResponse(
+        id=generate_id("cmpl"),
+        created=now_ts(),
+        model=config.model_name,
+        choices=choices,
+        usage=UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=total_completion,
+            total_tokens=prompt_tokens + total_completion,
+        ),
+        system_fingerprint=SYSTEM_FINGERPRINT,
+    )
+    return JSONResponse(content=resp.model_dump())
+
+
+async def _stream_completion_scheduled(
+    config: ServerConfig,
+    req: CompletionRequest,
+    prompt_tokens: int,
+    max_tokens: int,
+    n: int,
+    ignore_eos: bool,
+):
+    """Stream completion using scheduler for token timing."""
+    request_start = time.monotonic()
+    scheduler = config._scheduler
+    assert scheduler is not None
+    req_id = generate_id("cmpl")
+    created = now_ts()
+    include_usage = req.stream_options.get("include_usage", False) if req.stream_options else False
+    total_completion = 0
+
+    for idx in range(n):
+        inf_req = InferenceRequest(
+            request_id=generate_id("req"),
+            input_tokens=prompt_tokens,
+            max_tokens=max_tokens,
+            eos_min_ratio=config.eos_min_ratio,
+            ignore_eos=ignore_eos,
+        )
+        await scheduler.submit(inf_req)
+
+        # echo=True: emit prompt text first
+        if req.echo:
+            prompt_str = req.prompt if isinstance(req.prompt, str) else str(req.prompt)
+            echo_chunk = CompletionChunk(
+                id=req_id,
+                created=created,
+                model=config.model_name,
+                choices=[
+                    CompletionStreamChoice(index=idx, text=prompt_str, logprobs=None)
+                ],
+                system_fingerprint=SYSTEM_FINGERPRINT,
+            )
+            yield f"data: {echo_chunk.model_dump_json()}\n\n"
+
+        # Collect all tokens
+        token_count = 0
+        while True:
+            msg_type, value = await inf_req.token_queue.get()
+            if msg_type == "error":
+                break
+            if msg_type == "done":
+                break
+            token_count += 1
+
+        text = render_dummy_text(token_count)
+        finish_reason_override = None
+        if req.stop:
+            text, was_stopped = _check_stop_sequences(text, req.stop)
+            if was_stopped:
+                finish_reason_override = "stop"
+
+        tokens = text.split(" ") if text else []
+        for i, token in enumerate(tokens):
+            token_text = (" " + token) if i > 0 else token
+            chunk_lp = None
+            if req.logprobs is not None and req.logprobs > 0:
+                chunk_lp = generate_completion_logprobs([token_text], req.logprobs)
+            chunk = CompletionChunk(
+                id=req_id,
+                created=created,
+                model=config.model_name,
+                choices=[
+                    CompletionStreamChoice(index=idx, text=token_text, logprobs=chunk_lp)
+                ],
+                system_fingerprint=SYSTEM_FINGERPRINT,
+            )
+            yield f"data: {chunk.model_dump_json()}\n\n"
+            total_completion += 1
+
+        # Finish chunk
+        if finish_reason_override:
+            finish_reason = finish_reason_override
+        else:
+            finish_reason = inf_req.finish_reason if inf_req.is_done() else "stop"
+        chunk = CompletionChunk(
+            id=req_id,
+            created=created,
+            model=config.model_name,
+            choices=[
+                CompletionStreamChoice(
+                    index=idx, text="", finish_reason=finish_reason, logprobs=None,
+                )
+            ],
+            system_fingerprint=SYSTEM_FINGERPRINT,
+        )
+        yield f"data: {chunk.model_dump_json()}\n\n"
+
+    config._metrics.inc_tokens(total_completion)
+
+    if include_usage:
+        usage_chunk = CompletionChunk(
+            id=req_id,
+            created=created,
+            model=config.model_name,
+            choices=[],
+            system_fingerprint=SYSTEM_FINGERPRINT,
+            usage=UsageInfo(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=total_completion,
+                total_tokens=prompt_tokens + total_completion,
+            ),
+        )
+        yield f"data: {usage_chunk.model_dump_json()}\n\n"
+
+    # Log streaming request
+    total_ms = (time.monotonic() - request_start) * 1000
+    _log_request(
+        config,
+        prompt_tokens=prompt_tokens,
+        output_tokens=total_completion,
+        prefill_ms=0,
+        kv_transfer_ms=0,
+        decode_ms=total_ms,
+        total_ms=total_ms,
+    )
+
     yield "data: [DONE]\n\n"
 
 
@@ -773,6 +1023,7 @@ async def _stream_chat(
     ignore_eos: bool,
 ):
     """Stream chat completion chunks with per-token decode delay."""
+    request_start = time.monotonic()
     req_id = generate_id("chatcmpl")
     created = now_ts()
     include_usage = req.stream_options.get("include_usage", False) if req.stream_options else False
@@ -870,6 +1121,20 @@ async def _stream_chat(
         )
         yield f"data: {usage_chunk.model_dump_json()}\n\n"
 
+    # Log streaming request
+    prefill_delay = _compute_prefill_delay(config, prompt_tokens)
+    kv_delay = _compute_kv_delay(config, prompt_tokens)
+    total_ms = (time.monotonic() - request_start) * 1000
+    _log_request(
+        config,
+        prompt_tokens=prompt_tokens,
+        output_tokens=total_completion,
+        prefill_ms=prefill_delay * 1000,
+        kv_transfer_ms=kv_delay * 1000,
+        decode_ms=decode_delay * total_completion * 1000,
+        total_ms=total_ms,
+    )
+
     yield "data: [DONE]\n\n"
 
 
@@ -882,6 +1147,7 @@ async def _stream_completion(
     ignore_eos: bool,
 ):
     """Stream completion chunks with per-token decode delay."""
+    request_start = time.monotonic()
     req_id = generate_id("cmpl")
     created = now_ts()
     include_usage = req.stream_options.get("include_usage", False) if req.stream_options else False
@@ -976,5 +1242,19 @@ async def _stream_completion(
             ),
         )
         yield f"data: {usage_chunk.model_dump_json()}\n\n"
+
+    # Log streaming request
+    prefill_delay = _compute_prefill_delay(config, prompt_tokens)
+    kv_delay = _compute_kv_delay(config, prompt_tokens)
+    total_ms = (time.monotonic() - request_start) * 1000
+    _log_request(
+        config,
+        prompt_tokens=prompt_tokens,
+        output_tokens=total_completion,
+        prefill_ms=prefill_delay * 1000,
+        kv_transfer_ms=kv_delay * 1000,
+        decode_ms=decode_delay * total_completion * 1000,
+        total_ms=total_ms,
+    )
 
     yield "data: [DONE]\n\n"

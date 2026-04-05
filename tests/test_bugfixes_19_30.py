@@ -217,31 +217,38 @@ async def test_completions_uses_scheduler():
         max_num_batched_tokens=8192,
     )
     app = create_app(config)
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
-        # Test non-streaming
-        resp = await client.post(
-            "/v1/completions",
-            json={"model": "dummy", "prompt": "hello", "max_tokens": 5},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "choices" in data
-        assert len(data["choices"]) > 0
+    # Manually start scheduler (ASGI transport doesn't trigger lifespan)
+    if config._scheduler:
+        await config._scheduler.start()
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            # Test non-streaming
+            resp = await client.post(
+                "/v1/completions",
+                json={"model": "dummy", "prompt": "hello", "max_tokens": 5},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "choices" in data
+            assert len(data["choices"]) > 0
 
-        # Test streaming
-        resp = await client.post(
-            "/v1/completions",
-            json={
-                "model": "dummy",
-                "prompt": "hello",
-                "max_tokens": 5,
-                "stream": True,
-            },
-        )
-        assert resp.status_code == 200
-        assert "data:" in resp.text
+            # Test streaming
+            resp = await client.post(
+                "/v1/completions",
+                json={
+                    "model": "dummy",
+                    "prompt": "hello",
+                    "max_tokens": 5,
+                    "stream": True,
+                },
+            )
+            assert resp.status_code == 200
+            assert "data:" in resp.text
+    finally:
+        if config._scheduler:
+            await config._scheduler.stop()
 
 
 # --- Issue #28: Scheduler doesn't silently drop rejected requests ---

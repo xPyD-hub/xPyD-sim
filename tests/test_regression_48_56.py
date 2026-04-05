@@ -575,3 +575,57 @@ class TestBatchMetricsAlwaysPresent:
             assert "error" not in data, f"Should not return error: {data}"
             assert "prefill_queue_depth" in data
             assert data["decode_batch_size"] == 0
+
+
+# ===================================================================
+# Issue #65 — Prefill batch FIFO ordering
+# ===================================================================
+
+
+class TestPrefillFIFO:
+    """Guard against prefill batch formation violating FIFO order."""
+
+    def test_large_request_blocks_subsequent(self):
+        """#65: When a request doesn't fit, all subsequent requests must
+        stay in the remaining queue (break, not continue)."""
+        from xpyd_sim.scheduler import InferenceRequest, Scheduler, SchedulingConfig
+
+        cfg = SchedulingConfig(
+            max_model_len=131072,
+            max_num_batched_tokens=4096,
+            max_num_seqs=256,
+            enabled=True,
+        )
+        s = Scheduler(config=cfg)
+
+        large = InferenceRequest(request_id="large", input_tokens=5000, max_tokens=1)
+        small = InferenceRequest(request_id="small", input_tokens=100, max_tokens=1)
+
+        batch, remaining = s._form_prefill_batch([large, small])
+
+        # large doesn't fit → FIFO break → small stays in remaining too
+        assert len(batch) == 0, f"Batch should be empty: {[r.request_id for r in batch]}"
+        remaining_ids = [r.request_id for r in remaining]
+        assert remaining_ids == ["large", "small"], (
+            f"FIFO violated: remaining={remaining_ids}"
+        )
+
+    def test_max_num_seqs_blocks_subsequent(self):
+        """#65: When max_num_seqs is reached, subsequent requests stay queued."""
+        from xpyd_sim.scheduler import InferenceRequest, Scheduler, SchedulingConfig
+
+        cfg = SchedulingConfig(
+            max_model_len=131072,
+            max_num_batched_tokens=131072,
+            max_num_seqs=2,
+            enabled=True,
+        )
+        s = Scheduler(config=cfg)
+
+        r1 = InferenceRequest(request_id="r1", input_tokens=100, max_tokens=1)
+        r2 = InferenceRequest(request_id="r2", input_tokens=100, max_tokens=1)
+        r3 = InferenceRequest(request_id="r3", input_tokens=100, max_tokens=1)
+
+        batch, remaining = s._form_prefill_batch([r1, r2, r3])
+        assert [r.request_id for r in batch] == ["r1", "r2"]
+        assert [r.request_id for r in remaining] == ["r3"]

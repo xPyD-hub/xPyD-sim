@@ -1,6 +1,6 @@
 """Test /v1/embeddings endpoint for vLLM bench compatibility."""
-import pytest
 from fastapi.testclient import TestClient
+
 from xpyd_sim.server import ServerConfig, create_app
 
 

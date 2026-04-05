@@ -140,6 +140,28 @@ class CompletionChunk(BaseModel):
     usage: Optional[UsageInfo] = None
 
 
+class EmbeddingData(BaseModel):
+    object: str = "embedding"
+    index: int = 0
+    embedding: list[float] = []
+
+
+class EmbeddingRequest(BaseModel):
+    model: str = "dummy"
+    input: Any = ""
+    encoding_format: Optional[str] = "float"
+    user: Optional[str] = None
+
+    model_config = {"extra": "allow"}
+
+
+class EmbeddingResponse(BaseModel):
+    object: str = "list"
+    data: list[EmbeddingData] = []
+    model: str = "dummy"
+    usage: UsageInfo = Field(default_factory=UsageInfo)
+
+
 class ModelCard(BaseModel):
     id: str
     object: str = "model"

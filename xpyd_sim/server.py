@@ -37,6 +37,9 @@ from xpyd_sim.common.models import (
     CompletionResponse,
     CompletionStreamChoice,
     DeltaMessage,
+    EmbeddingData,
+    EmbeddingRequest,
+    EmbeddingResponse,
     ModelCard,
     ModelListResponse,
     StreamChoice,
@@ -68,6 +71,7 @@ class ServerConfig:
     # Scheduling config
     max_num_batched_tokens: int = 8192
     max_num_seqs: int = 256
+    embedding_dim: int = 1536
     scheduling_enabled: bool = False
     _latency_profile: LatencyProfile | None = None
     _metrics: Metrics = field(default_factory=Metrics)
@@ -314,6 +318,49 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             max_model_len=config.max_model_len,
         )
         return ModelListResponse(data=[card])
+
+    @app.post("/v1/embeddings")
+    async def embeddings(request: Request):
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {"message": "Invalid JSON body", "type": "invalid_request_error"}
+                },
+            )
+        try:
+            req = EmbeddingRequest(**body)
+        except ValidationError as e:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"message": str(e), "type": "invalid_request_error"}},
+            )
+
+        # Normalize input to list of strings
+        if isinstance(req.input, str):
+            inputs = [req.input]
+        elif isinstance(req.input, list):
+            inputs = [str(x) for x in req.input]
+        else:
+            inputs = [str(req.input)]
+
+        total_tokens = sum(max(1, len(s.split())) for s in inputs)
+
+        data = []
+        for i, text in enumerate(inputs):
+            vec = [random.gauss(0, 1) for _ in range(config.embedding_dim)]
+            data.append(EmbeddingData(index=i, embedding=vec))
+
+        return EmbeddingResponse(
+            data=data,
+            model=config.model_name,
+            usage=UsageInfo(
+                prompt_tokens=total_tokens,
+                total_tokens=total_tokens,
+            ),
+        )
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):

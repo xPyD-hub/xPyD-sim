@@ -332,7 +332,7 @@ class Scheduler:
         remaining: list[InferenceRequest] = []
         current_tokens = 0
 
-        for req in queue:
+        for i, req in enumerate(queue):
             if req.input_tokens > self.config.max_model_len:
                 # Reject: signal error directly (put_nowait and set are sync-safe)
                 req.token_queue.put_nowait(
@@ -345,11 +345,12 @@ class Scheduler:
                 req.done_event.set()
                 continue
             if current_tokens + req.input_tokens > self.config.max_num_batched_tokens:
-                remaining.append(req)
-                continue
+                # FIFO: stop here, all subsequent requests stay in queue
+                remaining.extend(queue[i:])
+                break
             if len(batch) >= self.config.max_num_seqs:
-                remaining.append(req)
-                continue
+                remaining.extend(queue[i:])
+                break
             batch.append(req)
             current_tokens += req.input_tokens
 

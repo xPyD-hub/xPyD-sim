@@ -359,6 +359,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     },
                 )
 
+            # Cap max_tokens so total (input + output) doesn't exceed max_model_len
+            available = config.max_model_len - prompt_tokens
+            if max_tokens > available:
+                max_tokens = max(1, available)
+
             # Warm-up penalty (applies to all paths)
             warmup_penalty = config._warmup_tracker.get_penalty() if config._warmup_tracker else 0
             if warmup_penalty > 0:
@@ -497,6 +502,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                         }
                     },
                 )
+
+            # Cap max_tokens so total (input + output) doesn't exceed max_model_len
+            available = config.max_model_len - prompt_tokens
+            if max_tokens > available:
+                max_tokens = max(1, available)
 
             # Warm-up penalty
             warmup_penalty = (

@@ -533,3 +533,45 @@ class TestSchedulerSyncSafety:
         msg_type, msg = big_req.token_queue.get_nowait()
         assert msg_type == "error"
         assert "exceeds" in msg
+
+
+# ===================================================================
+# Issue #64 — Batch metrics and /debug/batch in non-scheduling mode
+# ===================================================================
+
+
+class TestBatchMetricsAlwaysPresent:
+    """Guard against batch metrics disappearing when scheduling is off."""
+
+    @pytest.mark.asyncio
+    async def test_metrics_has_batch_gauges_without_scheduling(self):
+        """#64: /metrics must include batch gauge metrics even without scheduling."""
+        config = ServerConfig(scheduling_enabled=False)
+        app = create_app(config)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as c:
+            r = await c.get("/metrics")
+            text = r.text
+            for metric in [
+                "xpyd_sim_prefill_queue_depth",
+                "xpyd_sim_prefill_batch_size",
+                "xpyd_sim_decode_batch_size",
+                "xpyd_sim_decode_avg_context_length",
+            ]:
+                assert metric in text, f"Missing metric: {metric}"
+
+    @pytest.mark.asyncio
+    async def test_debug_batch_returns_state_without_scheduling(self):
+        """#64: /debug/batch must return zero-state, not error, without scheduling."""
+        config = ServerConfig(scheduling_enabled=False)
+        app = create_app(config)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as c:
+            r = await c.get("/debug/batch")
+            assert r.status_code == 200
+            data = r.json()
+            assert "error" not in data, f"Should not return error: {data}"
+            assert "prefill_queue_depth" in data
+            assert data["decode_batch_size"] == 0

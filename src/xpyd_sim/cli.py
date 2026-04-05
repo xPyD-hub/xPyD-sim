@@ -106,7 +106,11 @@ def _resolve_config(
     cli_args: argparse.Namespace,
     yaml_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Resolve config with priority: CLI > env vars > YAML > defaults."""
+    """Resolve config with priority: CLI > env vars > YAML > defaults.
+
+    All argparse args use default=None as a sentinel. A non-None value
+    means the user explicitly provided that argument on the CLI.
+    """
     result: dict[str, Any] = {}
 
     # Map CLI arg names to config keys
@@ -130,17 +134,11 @@ def _resolve_config(
     }
 
     for cli_attr, key in cli_to_key.items():
-        # 1. Check if CLI arg was explicitly provided
         cli_val = getattr(cli_args, cli_attr, None)
         default_val = _DEFAULTS[key]
-        # argparse sets unset args to their default — we use None defaults
-        # and check _explicitly_set to detect user intent
-        explicitly_set = key in getattr(cli_args, "_explicitly_set", set())
-        # For store_true flags like scheduling_enabled, check if truthy
-        if not explicitly_set and key == "scheduling_enabled" and cli_val is True:
-            explicitly_set = True
 
-        if explicitly_set:
+        # 1. CLI: non-None means explicitly set (all args default to None)
+        if cli_val is not None:
             result[key] = cli_val
             continue
 
@@ -165,51 +163,30 @@ def _resolve_config(
     return result
 
 
-class _TrackingNamespace(argparse.Namespace):
-    """Namespace that tracks which arguments were explicitly set on CLI."""
-
-    def __init__(self, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._explicitly_set: set[str] = set()
-
-
-class _TrackAction(argparse.Action):
-    """Custom action that records when an arg is explicitly provided."""
-
-    def __call__(  # type: ignore[override]
-        self, parser: argparse.ArgumentParser, namespace: argparse.Namespace,
-        values: Any, option_string: str | None = None,
-    ) -> None:
-        setattr(namespace, self.dest, values)
-        if hasattr(namespace, "_explicitly_set"):
-            namespace._explicitly_set.add(self.dest)
-
-
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="xpyd-sim", description="xPyD inference simulator")
     sub = parser.add_subparsers(dest="command")
 
     serve = sub.add_parser("serve", help="Start the unified simulator server")
-    serve.add_argument("--mode", choices=["dual", "prefill", "decode"], default="dual",
-                       action=_TrackAction)
-    serve.add_argument("--port", type=int, default=8000, action=_TrackAction)
-    serve.add_argument("--host", default="0.0.0.0", action=_TrackAction)
-    serve.add_argument("--model", default="dummy", action=_TrackAction)
-    serve.add_argument("--prefill-delay-ms", type=float, default=50.0, action=_TrackAction)
-    serve.add_argument("--kv-transfer-delay-ms", type=float, default=5.0, action=_TrackAction)
-    serve.add_argument("--decode-delay-per-token-ms", type=float, default=10.0,
-                       action=_TrackAction)
-    serve.add_argument("--eos-min-ratio", type=float, default=0.5, action=_TrackAction)
-    serve.add_argument("--max-model-len", type=int, default=131072, action=_TrackAction)
-    serve.add_argument("--warmup-requests", type=int, default=0, action=_TrackAction)
-    serve.add_argument("--warmup-penalty-ms", type=float, default=0.0, action=_TrackAction)
-    serve.add_argument("--log-requests", type=str, default=None, action=_TrackAction)
-    serve.add_argument("--profile", type=str, default=None, action=_TrackAction)
-    serve.add_argument("--config", type=str, default=None, help="YAML config file path",
-                       action=_TrackAction)
-    serve.add_argument("--max-num-batched-tokens", type=int, default=8192, action=_TrackAction)
-    serve.add_argument("--max-num-seqs", type=int, default=256, action=_TrackAction)
-    serve.add_argument("--scheduling", action="store_true", default=False,
+    # All defaults are None (sentinel) so _resolve_config can detect
+    # whether the user explicitly provided the argument.
+    serve.add_argument("--mode", choices=["dual", "prefill", "decode"], default=None)
+    serve.add_argument("--port", type=int, default=None)
+    serve.add_argument("--host", default=None)
+    serve.add_argument("--model", default=None)
+    serve.add_argument("--prefill-delay-ms", type=float, default=None)
+    serve.add_argument("--kv-transfer-delay-ms", type=float, default=None)
+    serve.add_argument("--decode-delay-per-token-ms", type=float, default=None)
+    serve.add_argument("--eos-min-ratio", type=float, default=None)
+    serve.add_argument("--max-model-len", type=int, default=None)
+    serve.add_argument("--warmup-requests", type=int, default=None)
+    serve.add_argument("--warmup-penalty-ms", type=float, default=None)
+    serve.add_argument("--log-requests", type=str, default=None)
+    serve.add_argument("--profile", type=str, default=None)
+    serve.add_argument("--config", type=str, default=None, help="YAML config file path")
+    serve.add_argument("--max-num-batched-tokens", type=int, default=None)
+    serve.add_argument("--max-num-seqs", type=int, default=None)
+    serve.add_argument("--scheduling", action="store_true", default=None,
                        dest="scheduling_enabled")
 
     # Calibrate subcommand
@@ -218,7 +195,7 @@ def main(argv: list[str] | None = None) -> None:
     cal.add_argument("--output", required=True, help="Path to write profile YAML")
     cal.add_argument("--plot", default=None, help="Path to write visualization PNG")
 
-    args = parser.parse_args(argv, namespace=_TrackingNamespace())
+    args = parser.parse_args(argv)
     if not args.command:
         parser.print_help()
         return

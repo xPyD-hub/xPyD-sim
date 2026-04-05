@@ -1,6 +1,6 @@
 """Test API key authentication for vLLM bench / proxy compatibility."""
-import pytest
 from fastapi.testclient import TestClient
+
 from xpyd_sim.server import ServerConfig, create_app
 
 

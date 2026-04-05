@@ -1,5 +1,6 @@
 """Test /v1/models root field for vLLM bench compatibility."""
 from fastapi.testclient import TestClient
+
 from xpyd_sim.server import ServerConfig, create_app
 
 

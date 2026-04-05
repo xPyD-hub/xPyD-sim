@@ -26,6 +26,8 @@ dev = [
     "pytest-timeout>=2.3.0",
     "ruff>=0.3.0",
     "isort>=5.13.0",
+]
+e2e = [
     "xpyd>=1.1.0",
 ]
 

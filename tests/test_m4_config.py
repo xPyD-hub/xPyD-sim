@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import textwrap
 from pathlib import Path
@@ -9,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from xpyd_sim.cli import _load_yaml_config, _resolve_config, _TrackingNamespace
+from xpyd_sim.cli import _load_yaml_config, _resolve_config
 
 
 @pytest.fixture()
@@ -42,6 +43,24 @@ def yaml_config_file(tmp_path: Path) -> Path:
     p = tmp_path / "config.yaml"
     p.write_text(config)
     return p
+
+
+def _make_ns(**overrides: object) -> argparse.Namespace:
+    """Create a Namespace with all CLI attrs set to None (sentinel) by default.
+
+    Non-None values simulate args that were explicitly provided on the CLI.
+    """
+    attrs = {
+        "mode": None, "port": None, "host": None, "model": None,
+        "prefill_delay_ms": None, "kv_transfer_delay_ms": None,
+        "decode_delay_per_token_ms": None, "eos_min_ratio": None,
+        "max_model_len": None, "warmup_requests": None,
+        "warmup_penalty_ms": None, "log_requests": None,
+        "profile": None, "max_num_batched_tokens": None,
+        "max_num_seqs": None, "scheduling_enabled": None,
+    }
+    attrs.update(overrides)
+    return argparse.Namespace(**attrs)
 
 
 class TestYAMLLoading:
@@ -84,17 +103,7 @@ class TestTC11_9_CLIOverridesYAML:
     def test_cli_overrides_yaml_mode(self, yaml_config_file: Path) -> None:
         """CLI --mode should override YAML mode."""
         yaml_cfg = _load_yaml_config(yaml_config_file)
-        ns = _TrackingNamespace()
-        ns.mode = "decode"
-        ns._explicitly_set = {"mode"}
-        # Set other attrs with defaults (not explicitly set)
-        for attr in (
-            "port", "host", "model", "prefill_delay_ms",
-            "kv_transfer_delay_ms", "decode_delay_per_token_ms",
-            "eos_min_ratio", "max_model_len", "warmup_requests",
-            "warmup_penalty_ms", "log_requests", "profile",
-        ):
-            setattr(ns, attr, None)
+        ns = _make_ns(mode="decode")  # CLI explicitly sets mode
 
         result = _resolve_config(ns, yaml_cfg)
         assert result["mode"] == "decode"  # CLI wins
@@ -102,16 +111,7 @@ class TestTC11_9_CLIOverridesYAML:
 
     def test_cli_overrides_yaml_port(self, yaml_config_file: Path) -> None:
         yaml_cfg = _load_yaml_config(yaml_config_file)
-        ns = _TrackingNamespace()
-        ns.port = 7777
-        ns._explicitly_set = {"port"}
-        for attr in (
-            "mode", "host", "model", "prefill_delay_ms",
-            "kv_transfer_delay_ms", "decode_delay_per_token_ms",
-            "eos_min_ratio", "max_model_len", "warmup_requests",
-            "warmup_penalty_ms", "log_requests", "profile",
-        ):
-            setattr(ns, attr, None)
+        ns = _make_ns(port=7777)  # CLI explicitly sets port
 
         result = _resolve_config(ns, yaml_cfg)
         assert result["port"] == 7777  # CLI wins
@@ -119,16 +119,7 @@ class TestTC11_9_CLIOverridesYAML:
 
     def test_cli_overrides_yaml_latency(self, yaml_config_file: Path) -> None:
         yaml_cfg = _load_yaml_config(yaml_config_file)
-        ns = _TrackingNamespace()
-        ns.prefill_delay_ms = 999.0
-        ns._explicitly_set = {"prefill_delay_ms"}
-        for attr in (
-            "mode", "port", "host", "model",
-            "kv_transfer_delay_ms", "decode_delay_per_token_ms",
-            "eos_min_ratio", "max_model_len", "warmup_requests",
-            "warmup_penalty_ms", "log_requests", "profile",
-        ):
-            setattr(ns, attr, None)
+        ns = _make_ns(prefill_delay_ms=999.0)  # CLI explicitly sets
 
         result = _resolve_config(ns, yaml_cfg)
         assert result["prefill_delay_ms"] == 999.0  # CLI wins
@@ -141,15 +132,7 @@ class TestTC11_10_YAMLOnlyConfig:
     def test_yaml_only_all_settings(self, yaml_config_file: Path) -> None:
         """When no CLI args are explicitly set, all values come from YAML."""
         yaml_cfg = _load_yaml_config(yaml_config_file)
-        ns = _TrackingNamespace()
-        # Nothing explicitly set
-        for attr in (
-            "mode", "port", "host", "model", "prefill_delay_ms",
-            "kv_transfer_delay_ms", "decode_delay_per_token_ms",
-            "eos_min_ratio", "max_model_len", "warmup_requests",
-            "warmup_penalty_ms", "log_requests", "profile",
-        ):
-            setattr(ns, attr, None)
+        ns = _make_ns()  # All None — nothing explicitly set
 
         result = _resolve_config(ns, yaml_cfg)
         assert result["mode"] == "prefill"
@@ -172,15 +155,7 @@ class TestTC11_11_DefaultConfig:
 
     def test_all_defaults(self) -> None:
         """When nothing is provided, sensible defaults are used."""
-        ns = _TrackingNamespace()
-        for attr in (
-            "mode", "port", "host", "model", "prefill_delay_ms",
-            "kv_transfer_delay_ms", "decode_delay_per_token_ms",
-            "eos_min_ratio", "max_model_len", "warmup_requests",
-            "warmup_penalty_ms", "log_requests", "profile",
-        ):
-            setattr(ns, attr, None)
-
+        ns = _make_ns()
         result = _resolve_config(ns, yaml_config=None)
         assert result["mode"] == "dual"
         assert result["port"] == 8000
@@ -202,14 +177,7 @@ class TestEnvVarFallback:
 
     def test_env_var_overrides_yaml(self, yaml_config_file: Path) -> None:
         yaml_cfg = _load_yaml_config(yaml_config_file)
-        ns = _TrackingNamespace()
-        for attr in (
-            "mode", "port", "host", "model", "prefill_delay_ms",
-            "kv_transfer_delay_ms", "decode_delay_per_token_ms",
-            "eos_min_ratio", "max_model_len", "warmup_requests",
-            "warmup_penalty_ms", "log_requests", "profile",
-        ):
-            setattr(ns, attr, None)
+        ns = _make_ns()
 
         with patch.dict(os.environ, {"XPYD_SIM_PORT": "5555"}):
             result = _resolve_config(ns, yaml_cfg)
@@ -217,30 +185,14 @@ class TestEnvVarFallback:
         assert result["mode"] == "prefill"  # YAML still used for others
 
     def test_cli_overrides_env(self) -> None:
-        ns = _TrackingNamespace()
-        ns.port = 1234
-        ns._explicitly_set = {"port"}
-        for attr in (
-            "mode", "host", "model", "prefill_delay_ms",
-            "kv_transfer_delay_ms", "decode_delay_per_token_ms",
-            "eos_min_ratio", "max_model_len", "warmup_requests",
-            "warmup_penalty_ms", "log_requests", "profile",
-        ):
-            setattr(ns, attr, None)
+        ns = _make_ns(port=1234)
 
         with patch.dict(os.environ, {"XPYD_SIM_PORT": "5555"}):
             result = _resolve_config(ns)
         assert result["port"] == 1234  # CLI wins over env
 
     def test_env_overrides_default(self) -> None:
-        ns = _TrackingNamespace()
-        for attr in (
-            "mode", "port", "host", "model", "prefill_delay_ms",
-            "kv_transfer_delay_ms", "decode_delay_per_token_ms",
-            "eos_min_ratio", "max_model_len", "warmup_requests",
-            "warmup_penalty_ms", "log_requests", "profile",
-        ):
-            setattr(ns, attr, None)
+        ns = _make_ns()
 
         with patch.dict(os.environ, {"XPYD_SIM_MODE": "decode"}):
             result = _resolve_config(ns)
@@ -248,21 +200,40 @@ class TestEnvVarFallback:
 
 
 class TestCLIParsing:
-    """Test that CLI argument parsing correctly tracks explicitly-set args."""
+    """Test that CLI argument parsing correctly detects explicitly-set args."""
 
     def test_parse_with_explicit_args(self) -> None:
-        """Verify the full parse path tracks explicitly set args."""
-        # We test the argparse integration indirectly through main()
-        # by verifying the serve subcommand parses correctly
-        import argparse
+        """Verify argparse with None defaults: set args are non-None."""
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--mode", default=None)
+        parser.add_argument("--port", type=int, default=None)
 
-        from xpyd_sim.cli import _TrackAction, _TrackingNamespace
+        ns = parser.parse_args(["--mode", "prefill"])
+        assert ns.mode == "prefill"  # Set → non-None
+        assert ns.port is None  # Not set → None
+
+        result = _resolve_config(ns)
+        assert result["mode"] == "prefill"
+        assert result["port"] == 8000  # default
+
+    def test_subparser_preserves_explicit_args(self) -> None:
+        """Verify that subparser args are correctly detected as explicit.
+
+        This is the regression test for #62: _TrackAction failed in
+        subparsers because argparse uses a temporary namespace internally.
+        The new sentinel-based approach works correctly.
+        """
 
         parser = argparse.ArgumentParser()
-        parser.add_argument("--mode", default="dual", action=_TrackAction)
-        parser.add_argument("--port", type=int, default=8000, action=_TrackAction)
+        sub = parser.add_subparsers(dest="command")
+        serve = sub.add_parser("serve")
+        serve.add_argument("--mode", default=None)
+        serve.add_argument("--port", type=int, default=None)
 
-        ns = parser.parse_args(["--mode", "prefill"], namespace=_TrackingNamespace())
-        assert ns.mode == "prefill"
-        assert "mode" in ns._explicitly_set
-        assert "port" not in ns._explicitly_set
+        ns = parser.parse_args(["serve", "--mode", "prefill"])
+        assert ns.mode == "prefill"  # Explicitly set
+        assert ns.port is None  # Not set
+
+        result = _resolve_config(ns)
+        assert result["mode"] == "prefill"  # CLI wins
+        assert result["port"] == 8000  # default

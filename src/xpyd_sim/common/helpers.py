@@ -57,4 +57,13 @@ def count_prompt_tokens(prompt: Any = None, messages: list | None = None) -> int
 
 
 def render_dummy_text(n_tokens: int) -> str:
-    return " ".join(DUMMY_TOKENS[: min(n_tokens, len(DUMMY_TOKENS))])
+    if n_tokens <= 0:
+        return ""
+    if n_tokens <= len(DUMMY_TOKENS):
+        return " ".join(DUMMY_TOKENS[:n_tokens])
+    # Cycle through DUMMY_TOKENS to produce enough tokens
+    tokens: list[str] = []
+    pool_len = len(DUMMY_TOKENS)
+    for i in range(n_tokens):
+        tokens.append(DUMMY_TOKENS[i % pool_len])
+    return " ".join(tokens)

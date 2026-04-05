@@ -79,6 +79,7 @@ _ENV_MAP: dict[str, tuple[str, type]] = {
     "max_num_batched_tokens": ("XPYD_SIM_MAX_NUM_BATCHED_TOKENS", int),
     "max_num_seqs": ("XPYD_SIM_MAX_NUM_SEQS", int),
     "scheduling_enabled": ("XPYD_SIM_SCHEDULING_ENABLED", lambda v: v.lower() in ("1", "true")),
+    "require_api_key": ("XPYD_SIM_REQUIRE_API_KEY", str),
 }
 
 # Default values for all config keys
@@ -99,6 +100,7 @@ _DEFAULTS: dict[str, Any] = {
     "max_num_batched_tokens": 8192,
     "max_num_seqs": 256,
     "scheduling_enabled": False,
+    "require_api_key": None,
 }
 
 
@@ -131,6 +133,7 @@ def _resolve_config(
         "max_num_batched_tokens": "max_num_batched_tokens",
         "max_num_seqs": "max_num_seqs",
         "scheduling_enabled": "scheduling_enabled",
+        "require_api_key": "require_api_key",
     }
 
     for cli_attr, key in cli_to_key.items():
@@ -188,6 +191,7 @@ def main(argv: list[str] | None = None) -> None:
     serve.add_argument("--max-num-seqs", type=int, default=None)
     serve.add_argument("--scheduling", action="store_true", default=None,
                        dest="scheduling_enabled")
+    serve.add_argument("--require-api-key", type=str, default=None)
 
     # Calibrate subcommand
     cal = sub.add_parser("calibrate", help="Fit latency curves from sample data")
@@ -233,6 +237,7 @@ def main(argv: list[str] | None = None) -> None:
             max_num_batched_tokens=cfg["max_num_batched_tokens"],
             max_num_seqs=cfg["max_num_seqs"],
             scheduling_enabled=cfg["scheduling_enabled"],
+            require_api_key=cfg["require_api_key"],
         )
         app = create_app(config)
         uvicorn.run(app, host=cfg["host"], port=cfg["port"])

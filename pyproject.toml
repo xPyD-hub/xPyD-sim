@@ -27,9 +27,6 @@ dev = [
     "ruff>=0.3.0",
     "isort>=5.13.0",
 ]
-e2e = [
-    "xpyd-proxy>=1.2.0",
-]
 
 [project.scripts]
 xpyd-sim = "xpyd_sim.cli:main"

@@ -37,15 +37,16 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v --tb=short --timeout=120
 
-  e2e:
+  integration-trigger:
+    needs: [test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install dependencies
-        run: pip install -e ".[dev,e2e]"
-      - name: Run e2e tests
-        run: pytest tests/test_e2e_proxy.py -v --tb=short --timeout=120
+      - name: Trigger integration tests
+        env:
+          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/xPyD-hub/xPyD-integration/dispatches \
+            -f event_type=dependency-updated \
+            -f "client_payload[repo]=xPyD-sim" \
+            -f "client_payload[sha]=\${{ github.sha }}"

@@ -74,6 +74,7 @@ class ServerConfig:
     _request_logger: RequestLogger | None = None
     _warmup_tracker: WarmupTracker | None = None
     _scheduler: Scheduler | None = None
+    require_api_key: str | None = None
 
     def load_profile(self) -> None:
         """Load latency profile if configured."""
@@ -223,6 +224,17 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
     app = FastAPI(title="xPyD-sim", lifespan=lifespan)
     app.state.config = config
+
+    @app.middleware("http")
+    async def auth_middleware(request: Request, call_next):
+        if config.require_api_key and request.url.path.startswith("/v1/"):
+            auth = request.headers.get("authorization", "")
+            if auth != f"Bearer {config.require_api_key}":
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": {"message": "Invalid API key", "type": "auth_error"}},
+                )
+        return await call_next(request)
 
     @app.exception_handler(ValidationError)
     async def validation_exception_handler(request: Request, exc: ValidationError):

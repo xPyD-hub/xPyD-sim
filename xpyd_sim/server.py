@@ -59,7 +59,7 @@ SYSTEM_FINGERPRINT = "fp_xpyd_sim"
 def _build_tool_call_response(req: ChatCompletionRequest):
     """Build tool call objects and estimate tokens.
 
-    Returns (tool_call_objects, num_tokens) or None.
+    Returns (tool_call_objects, num_tokens, tool_calls_data) or None.
     """
     tools = getattr(req, "tools", None)
     choice = getattr(req, "tool_choice", None)
@@ -71,7 +71,7 @@ def _build_tool_call_response(req: ChatCompletionRequest):
         getattr(req, 'parallel_tool_calls', None),
     )
     tc_json = json.dumps(tool_calls_data)
-    num_tokens = max(1, len(tc_json.split()))
+    num_tokens = max(1, len(tc_json) // 4)
     tool_call_objects = [
         ToolCall(
             id=tc["id"],
@@ -492,8 +492,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             total_completion = 0
             max_choice_tokens = 0
 
-            tc_result = _build_tool_call_response(req)
             for i in range(n):
+                tc_result = _build_tool_call_response(req)
                 if tc_result:
                     tool_call_objects, tc_tokens, _ = tc_result
                     total_completion += tc_tokens
@@ -742,11 +742,16 @@ async def _non_stream_chat_scheduled(
     choices = []
     total_completion = 0
 
-    tc_result = _build_tool_call_response(req)
-
     for i in range(n):
+        tc_result = _build_tool_call_response(req)
+
         if tc_result:
             tool_call_objects, tc_tokens, _ = tc_result
+            # Simulate prefill + decode delay for tool call
+            prefill_delay = _compute_prefill_delay(config, prompt_tokens)
+            kv_delay = _compute_kv_delay(config, prompt_tokens)
+            decode_delay = _compute_decode_delay(config)
+            await asyncio.sleep(prefill_delay + kv_delay + decode_delay * tc_tokens)
             total_completion += tc_tokens
             choices.append(
                 Choice(
@@ -839,13 +844,15 @@ async def _stream_chat_scheduled(
     req_id = generate_id("chatcmpl")
     created = now_ts()
     include_usage = req.stream_options.get("include_usage", False) if req.stream_options else False
+    decode_delay = _compute_decode_delay(config)
     total_completion = 0
 
-    tc_result = _build_tool_call_response(req)
-
     for idx in range(n):
+        tc_result = _build_tool_call_response(req)
         if tc_result:
             tool_call_objects, tc_tokens, tool_calls_data = tc_result
+            # Simulate decode delay for tool call chunks
+            await asyncio.sleep(decode_delay)
             tc_deltas = []
             for ti, tc in enumerate(tool_calls_data):
                 tc_deltas.append({
@@ -867,6 +874,7 @@ async def _stream_chat_scheduled(
                 system_fingerprint=SYSTEM_FINGERPRINT,
             )
             yield f"data: {chunk.model_dump_json()}\n\n"
+            await asyncio.sleep(decode_delay)
             arg_deltas = []
             for ti, tc in enumerate(tool_calls_data):
                 arg_deltas.append({
@@ -1242,11 +1250,14 @@ async def _stream_chat(
     decode_delay = _compute_decode_delay(config)
     total_completion = 0
 
-    tc_result = _build_tool_call_response(req)
-
     for idx in range(n):
+        tc_result = _build_tool_call_response(req)
         if tc_result:
             tool_call_objects, tc_tokens, tool_calls_data = tc_result
+            # Simulate prefill delay before first chunk
+            prefill_delay = _compute_prefill_delay(config, prompt_tokens)
+            kv_delay = _compute_kv_delay(config, prompt_tokens)
+            await asyncio.sleep(prefill_delay + kv_delay)
             # First chunk: role + tool_calls
             tc_deltas = []
             for ti, tc in enumerate(tool_calls_data):
@@ -1272,6 +1283,7 @@ async def _stream_chat(
             yield f"data: {chunk.model_dump_json()}\n\n"
 
             # Arguments chunk
+            await asyncio.sleep(decode_delay)
             arg_deltas = []
             for ti, tc in enumerate(tool_calls_data):
                 arg_deltas.append({

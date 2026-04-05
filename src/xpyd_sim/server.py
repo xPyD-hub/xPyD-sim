@@ -251,33 +251,46 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
     @app.get("/metrics")
     async def metrics():
-        extra = ""
         if config._scheduler:
             state = config._scheduler.get_batch_state()
-            extra = (
-                f"\n# HELP xpyd_sim_prefill_queue_depth Current prefill queue depth.\n"
-                f"# TYPE xpyd_sim_prefill_queue_depth gauge\n"
-                f"xpyd_sim_prefill_queue_depth {state['prefill_queue_depth']}\n"
-                f"# HELP xpyd_sim_prefill_batch_size Current prefill batch size.\n"
-                f"# TYPE xpyd_sim_prefill_batch_size gauge\n"
-                f"xpyd_sim_prefill_batch_size {state['prefill_batch_size']}\n"
-                f"# HELP xpyd_sim_decode_batch_size Current decode batch size.\n"
-                f"# TYPE xpyd_sim_decode_batch_size gauge\n"
-                f"xpyd_sim_decode_batch_size {state['decode_batch_size']}\n"
-                f"# HELP xpyd_sim_decode_avg_context_length "
-                f"Average context length in decode batch.\n"
-                f"# TYPE xpyd_sim_decode_avg_context_length gauge\n"
-                f"xpyd_sim_decode_avg_context_length {state['decode_avg_context_length']}\n"
-            )
+        else:
+            state = {
+                "prefill_queue_depth": 0,
+                "prefill_batch_size": 0,
+                "decode_batch_size": 0,
+                "decode_avg_context_length": 0.0,
+            }
+        batch_metrics = (
+            f"\n# HELP xpyd_sim_prefill_queue_depth Current prefill queue depth.\n"
+            f"# TYPE xpyd_sim_prefill_queue_depth gauge\n"
+            f"xpyd_sim_prefill_queue_depth {state['prefill_queue_depth']}\n"
+            f"# HELP xpyd_sim_prefill_batch_size Current prefill batch size.\n"
+            f"# TYPE xpyd_sim_prefill_batch_size gauge\n"
+            f"xpyd_sim_prefill_batch_size {state['prefill_batch_size']}\n"
+            f"# HELP xpyd_sim_decode_batch_size Current decode batch size.\n"
+            f"# TYPE xpyd_sim_decode_batch_size gauge\n"
+            f"xpyd_sim_decode_batch_size {state['decode_batch_size']}\n"
+            f"# HELP xpyd_sim_decode_avg_context_length "
+            f"Average context length in decode batch.\n"
+            f"# TYPE xpyd_sim_decode_avg_context_length gauge\n"
+            f"xpyd_sim_decode_avg_context_length {state['decode_avg_context_length']}\n"
+        )
         return PlainTextResponse(
-            config._metrics.render_prometheus() + extra,
+            config._metrics.render_prometheus() + batch_metrics,
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
 
     @app.get("/debug/batch")
     async def debug_batch():
         if not config._scheduler:
-            return {"error": "Scheduling not enabled"}
+            return {
+                "prefill_queue_depth": 0,
+                "prefill_batch_size": 0,
+                "prefill_batch_tokens": 0,
+                "decode_batch_size": 0,
+                "decode_avg_context_length": 0.0,
+                "decode_requests": [],
+            }
         return config._scheduler.get_batch_state()
 
     @app.get("/v1/models")

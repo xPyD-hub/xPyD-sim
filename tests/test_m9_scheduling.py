@@ -588,14 +588,17 @@ async def test_tc13_12_e2e_pd_disaggregation():
 
 @pytest.mark.asyncio
 async def test_debug_batch_disabled():
-    """When scheduling is disabled, /debug/batch returns an error."""
+    """When scheduling is disabled, /debug/batch returns zero-state (not error)."""
     config = ServerConfig(scheduling_enabled=False)
     app = create_app(config)
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/debug/batch")
         assert resp.status_code == 200
-        assert "error" in resp.json()
+        data = resp.json()
+        assert "prefill_queue_depth" in data
+        assert data["prefill_queue_depth"] == 0
+        assert data["decode_batch_size"] == 0
 
 
 # ---------------------------------------------------------------------------

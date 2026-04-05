@@ -28,7 +28,7 @@ dev = [
     "isort>=5.13.0",
 ]
 e2e = [
-    "xpyd>=1.1.0",
+    "xpyd-proxy>=1.2.0",
 ]
 
 [project.scripts]

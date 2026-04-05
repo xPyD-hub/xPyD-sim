@@ -20,7 +20,7 @@ import time
 pytest = __import__("pytest")
 
 # Skip entire module if xpyd (proxy) is not installed
-xpyd = pytest.importorskip("xpyd", reason="xpyd-proxy not installed (pip install xpyd-sim[e2e])")
+xpyd = pytest.importorskip("xpyd", reason="xpyd-proxy not installed")
 
 import httpx  # noqa: E402
 import uvicorn  # noqa: E402

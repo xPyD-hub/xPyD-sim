@@ -4,6 +4,9 @@ Tests the full PD disaggregation flow:
   client → proxy → sim(prefill) → sim(decode) → client
 
 Validates response FORMAT (not content), both endpoints, streaming + non-streaming.
+
+Requires: pip install xpyd-sim[e2e]
+Run with: pytest tests/test_e2e_proxy.py -m e2e
 """
 
 from __future__ import annotations
@@ -14,13 +17,18 @@ import socket
 import threading
 import time
 
-import httpx
-import uvicorn
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from xpyd.proxy import Proxy, RoundRobinSchedulingPolicy
+pytest = __import__("pytest")
 
-from xpyd_sim.server import ServerConfig, create_app
+# Skip entire module if xpyd (proxy) is not installed
+xpyd = pytest.importorskip("xpyd", reason="xpyd-proxy not installed (pip install xpyd-sim[e2e])")
+
+import httpx  # noqa: E402
+import uvicorn  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from xpyd.proxy import Proxy, RoundRobinSchedulingPolicy  # noqa: E402
+
+from xpyd_sim.server import ServerConfig, create_app  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers

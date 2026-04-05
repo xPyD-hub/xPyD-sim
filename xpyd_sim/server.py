@@ -310,6 +310,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         card = ModelCard(
             id=config.model_name,
             created=now_ts(),
+            root=config.model_name,
             max_model_len=config.max_model_len,
         )
         return ModelListResponse(data=[card])

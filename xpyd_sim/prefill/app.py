@@ -79,7 +79,7 @@ def create_prefill_app(
 
     @app.get("/v1/models")
     async def list_models() -> ModelListResponse:
-        card = ModelCard(id=model_name, created=now_ts())
+        card = ModelCard(id=model_name, created=now_ts(), root=model_name)
         return ModelListResponse(data=[card])
 
     @app.post("/v1/chat/completions")

@@ -1,18 +1,17 @@
 # xPyD-sim
 
-OpenAI-compatible LLM inference simulator for [xPyD](https://github.com/xPyD-hub).
+**OpenAI-compatible LLM inference simulator for testing and benchmarking.**
 
-Simulates prefill and decode nodes with realistic behavior for testing xPyD-bench and xPyD-proxy without real GPU hardware.
+xPyD-sim simulates prefill and decode nodes with realistic latency behavior, enabling testing of xPyD-proxy and xPyD-bench without real GPU hardware.
 
-## Features
+## Key Features
 
-- Separate prefill and decode node simulators
-- Full OpenAI API compatibility (/v1/completions, /v1/chat/completions, /v1/models)
-- Configurable latency (prefill delay, decode delay per token)
-- Streaming support with realistic token-by-token delivery
-- EOS simulation with configurable output length distribution
-- All OpenAI API parameters accepted
-- Spec-compliant response formats
+- **Prefill/Decode simulation** — separate modes with configurable latency
+- **Full OpenAI API** — /v1/completions, /v1/chat/completions, /v1/embeddings, /v1/models
+- **vLLM compatible** — accepts all vLLM-specific parameters
+- **Scheduling simulation** — batch formation, decode iteration, queue depth
+- **Calibration tool** — fit latency curves from real hardware measurements
+- **Prometheus metrics** — /metrics endpoint for monitoring
 
 ## Install
 
@@ -20,16 +19,33 @@ Simulates prefill and decode nodes with realistic behavior for testing xPyD-benc
 pip install xpyd-sim
 ```
 
+Or as part of the full xPyD toolkit:
+
+```bash
+pip install xpyd
+```
+
 ## Quick Start
 
 ```bash
-# Start prefill node
-xpyd-sim prefill --port 8001
+# Start dual mode (prefill + decode)
+xpyd-sim --mode dual --port 8000
 
-# Start decode node
-xpyd-sim decode --port 8002
+# Start PD disaggregated
+xpyd-sim --mode prefill --port 8001
+xpyd-sim --mode decode --port 8002
 ```
+
+## Part of xPyD
+
+| Component | Description |
+|-----------|-------------|
+| [xpyd-proxy](https://github.com/xPyD-hub/xPyD-proxy) | PD-disaggregated proxy |
+| **xpyd-sim** | OpenAI-compatible inference simulator |
+| [xpyd-bench](https://github.com/xPyD-hub/xPyD-bench) | Benchmarking & planning tool |
+
+📖 **[Full Guide →](docs/guide.md)** | 💡 **[Examples →](examples/)** | 🏗️ **[Contributing →](CONTRIBUTING.md)**
 
 ## License
 
-TBD
+Apache 2.0 — see [LICENSE](LICENSE)

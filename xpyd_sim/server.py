@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import math
 import random
+import struct
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -54,6 +56,66 @@ from xpyd_sim.profile import LatencyProfile
 from xpyd_sim.scheduler import InferenceRequest, Scheduler, SchedulingConfig
 
 SYSTEM_FINGERPRINT = "fp_xpyd_sim"
+
+
+def _validate_common_params(
+    temperature: float | None,
+    top_p: float | None,
+    frequency_penalty: float | None,
+    presence_penalty: float | None,
+    n: int | None,
+) -> str | None:
+    """Validate common OpenAI parameter ranges. Returns error message or None."""
+    if temperature is not None and not (0 <= temperature <= 2):
+        return f"temperature must be between 0 and 2, got {temperature}"
+    if top_p is not None and not (0 < top_p <= 1):
+        return f"top_p must be between 0 (exclusive) and 1, got {top_p}"
+    if frequency_penalty is not None and not (-2 <= frequency_penalty <= 2):
+        return f"frequency_penalty must be between -2 and 2, got {frequency_penalty}"
+    if presence_penalty is not None and not (-2 <= presence_penalty <= 2):
+        return f"presence_penalty must be between -2 and 2, got {presence_penalty}"
+    if n is not None and n < 1:
+        return f"n must be a positive integer, got {n}"
+    return None
+
+
+def _generate_dummy_from_schema(schema: dict) -> Any:
+    """Recursively generate dummy values conforming to a JSON schema."""
+    schema_type = schema.get("type", "object")
+    if schema_type == "string":
+        return "dummy_value"
+    if schema_type == "integer":
+        return 42
+    if schema_type == "number":
+        return 3.14
+    if schema_type == "boolean":
+        return True
+    if schema_type == "array":
+        return []
+    if schema_type == "object":
+        properties = schema.get("properties", {})
+        result = {}
+        for key, prop_schema in properties.items():
+            result[key] = _generate_dummy_from_schema(prop_schema)
+        return result
+    return None
+
+
+def _generate_response_content(
+    response_format: dict | None,
+    num_tokens: int,
+) -> str | None:
+    """Generate content based on response_format. Returns None if no special format."""
+    if not response_format:
+        return None
+    fmt_type = response_format.get("type")
+    if fmt_type == "json_object":
+        return json.dumps({"result": render_dummy_text(num_tokens)})
+    if fmt_type == "json_schema":
+        json_schema = response_format.get("json_schema", {})
+        schema = json_schema.get("schema", {})
+        return json.dumps(_generate_dummy_from_schema(schema))
+    return None
 
 
 def _should_use_tool_calls(req: ChatCompletionRequest) -> bool:
@@ -389,7 +451,13 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         data = []
         for i, text in enumerate(inputs):
             vec = [random.gauss(0, 1) for _ in range(config.embedding_dim)]
-            data.append(EmbeddingData(index=i, embedding=vec))
+            # Support base64 encoding format
+            if req.encoding_format == "base64":
+                packed = struct.pack(f'{len(vec)}f', *vec)
+                embedding_value = base64.b64encode(packed).decode('ascii')
+            else:
+                embedding_value = vec
+            data.append(EmbeddingData(index=i, embedding=embedding_value))
 
         return EmbeddingResponse(
             data=data,
@@ -435,6 +503,17 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                 return JSONResponse(
                     status_code=400,
                     content={"error": {"message": str(e), "type": "invalid_request_error"}},
+                )
+
+            # Validate parameter ranges (OpenAI spec)
+            param_err = _validate_common_params(
+                req.temperature, req.top_p, req.frequency_penalty,
+                req.presence_penalty, req.n,
+            )
+            if param_err:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": {"message": param_err, "type": "invalid_request_error"}},
                 )
 
             prompt_tokens = count_prompt_tokens(messages=req.messages)
@@ -520,7 +599,14 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     num_tokens, finish_reason = _compute_output_length(
                         max_tokens, config.eos_min_ratio, ignore_eos
                     )
-                    text = render_dummy_text(num_tokens)
+                    # Check for response_format (json_object / json_schema)
+                    formatted_content = _generate_response_content(
+                        req.response_format, num_tokens,
+                    )
+                    if formatted_content is not None:
+                        text = formatted_content
+                    else:
+                        text = render_dummy_text(num_tokens)
                     text, stopped = _check_stop_sequences(text, req.stop)
                     if stopped:
                         finish_reason = "stop"
@@ -601,6 +687,29 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     status_code=400,
                     content={"error": {"message": str(e), "type": "invalid_request_error"}},
                 )
+
+            # Validate parameter ranges (OpenAI spec)
+            param_err = _validate_common_params(
+                req.temperature, req.top_p, req.frequency_penalty,
+                req.presence_penalty, req.n,
+            )
+            if param_err:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": {"message": param_err, "type": "invalid_request_error"}},
+                )
+            if req.best_of is not None:
+                n_val = req.n or 1
+                if req.best_of < n_val:
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "error": {
+                                "message": f"best_of must be >= n, got best_of={req.best_of} n={n_val}",
+                                "type": "invalid_request_error",
+                            }
+                        },
+                    )
 
             prompt_tokens = count_prompt_tokens(prompt=req.prompt)
             max_tokens = get_effective_max_tokens(req.max_tokens)
@@ -1336,7 +1445,14 @@ async def _stream_chat(
             num_tokens, finish_reason = _compute_output_length(
                 max_tokens, config.eos_min_ratio, ignore_eos
             )
-            text = render_dummy_text(num_tokens)
+            # Check for response_format (json_object / json_schema)
+            formatted_content = _generate_response_content(
+                req.response_format, num_tokens,
+            )
+            if formatted_content is not None:
+                text = formatted_content
+            else:
+                text = render_dummy_text(num_tokens)
 
             # First chunk: role
             chunk = ChatCompletionChunk(

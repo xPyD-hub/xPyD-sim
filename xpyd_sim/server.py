@@ -50,7 +50,11 @@ from xpyd_sim.common.models import (
     ToolCallFunction,
     UsageInfo,
 )
-from xpyd_sim.common.tools import build_tool_calls, should_generate_tool_calls
+from xpyd_sim.common.tools import (
+    build_tool_calls,
+    generate_dummy_from_schema,
+    should_generate_tool_calls,
+)
 from xpyd_sim.observability import Metrics, RequestLogger, WarmupTracker
 from xpyd_sim.profile import LatencyProfile
 from xpyd_sim.scheduler import InferenceRequest, Scheduler, SchedulingConfig
@@ -79,28 +83,6 @@ def _validate_common_params(
     return None
 
 
-def _generate_dummy_from_schema(schema: dict) -> Any:
-    """Recursively generate dummy values conforming to a JSON schema."""
-    schema_type = schema.get("type", "object")
-    if schema_type == "string":
-        return "dummy_value"
-    if schema_type == "integer":
-        return 42
-    if schema_type == "number":
-        return 3.14
-    if schema_type == "boolean":
-        return True
-    if schema_type == "array":
-        return []
-    if schema_type == "object":
-        properties = schema.get("properties", {})
-        result = {}
-        for key, prop_schema in properties.items():
-            result[key] = _generate_dummy_from_schema(prop_schema)
-        return result
-    return None
-
-
 def _generate_response_content(
     response_format: dict | None,
     num_tokens: int,
@@ -114,7 +96,7 @@ def _generate_response_content(
     if fmt_type == "json_schema":
         json_schema = response_format.get("json_schema", {})
         schema = json_schema.get("schema", {})
-        return json.dumps(_generate_dummy_from_schema(schema))
+        return json.dumps(generate_dummy_from_schema(schema))
     return None
 
 
@@ -453,7 +435,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             vec = [random.gauss(0, 1) for _ in range(config.embedding_dim)]
             # Support base64 encoding format
             if req.encoding_format == "base64":
-                packed = struct.pack(f'{len(vec)}f', *vec)
+                packed = struct.pack(f'<{len(vec)}f', *vec)
                 embedding_value = base64.b64encode(packed).decode('ascii')
             else:
                 embedding_value = vec
@@ -515,6 +497,23 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     status_code=400,
                     content={"error": {"message": param_err, "type": "invalid_request_error"}},
                 )
+
+            best_of = getattr(req, 'best_of', None)
+            if best_of is not None:
+                n_val = req.n or 1
+                if best_of < n_val:
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "error": {
+                                "message": (
+                                    f"best_of must be >= n, got "
+                                    f"best_of={best_of} n={n_val}"
+                                ),
+                                "type": "invalid_request_error",
+                            }
+                        },
+                    )
 
             prompt_tokens = count_prompt_tokens(messages=req.messages)
             max_tokens = get_effective_max_tokens(req.max_completion_tokens, req.max_tokens)
@@ -607,10 +606,13 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                         text = formatted_content
                     else:
                         text = render_dummy_text(num_tokens)
-                    text, stopped = _check_stop_sequences(text, req.stop)
-                    if stopped:
-                        finish_reason = "stop"
-                        num_tokens = max(1, len(text.split()))
+                    if formatted_content is None:
+                        text, stopped = _check_stop_sequences(
+                            text, req.stop,
+                        )
+                        if stopped:
+                            finish_reason = "stop"
+                            num_tokens = max(1, len(text.split()))
                     total_completion += num_tokens
                     max_choice_tokens = max(max_choice_tokens, num_tokens)
                     lp_data = None
@@ -705,7 +707,10 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                         status_code=400,
                         content={
                             "error": {
-                                "message": f"best_of must be >= n, got best_of={req.best_of} n={n_val}",
+                                "message": (
+                                    f"best_of must be >= n, got "
+                                    f"best_of={req.best_of} n={n_val}"
+                                ),
                                 "type": "invalid_request_error",
                             }
                         },
@@ -901,13 +906,23 @@ async def _non_stream_chat_scheduled(
                 )
             )
         else:
-            text = render_dummy_text(inf_req.generated_tokens)
-            text, stopped = _check_stop_sequences(text, req.stop)
+            formatted = _generate_response_content(
+                req.response_format,
+                inf_req.generated_tokens,
+            )
+            if formatted is not None:
+                text = formatted
+            else:
+                text = render_dummy_text(inf_req.generated_tokens)
             finish_reason = inf_req.finish_reason
             num_tokens = inf_req.generated_tokens
-            if stopped:
-                finish_reason = "stop"
-                num_tokens = max(1, len(text.split()))
+            if formatted is None:
+                text, stopped = _check_stop_sequences(
+                    text, req.stop,
+                )
+                if stopped:
+                    finish_reason = "stop"
+                    num_tokens = max(1, len(text.split()))
             total_completion += num_tokens
 
             lp_data = None
@@ -1063,10 +1078,19 @@ async def _stream_chat_scheduled(
                 token_count += 1
 
             # Build full text, apply stop truncation, then stream
-            text = render_dummy_text(token_count)
+            formatted = _generate_response_content(
+                req.response_format, token_count,
+            )
+            if formatted is not None:
+                text = formatted
+            else:
+                text = render_dummy_text(token_count)
             finish_reason_override = None
-            if req.stop:
-                text, was_stopped = _check_stop_sequences(text, req.stop)
+            # Skip stop sequences when response_format is JSON
+            if req.stop and formatted is None:
+                text, was_stopped = _check_stop_sequences(
+                    text, req.stop,
+                )
                 if was_stopped:
                     finish_reason_override = "stop"
 
@@ -1074,8 +1098,14 @@ async def _stream_chat_scheduled(
             for i, token in enumerate(tokens):
                 token_text = (" " + token) if i > 0 else token
                 chunk_lp = None
-                if req.logprobs and req.top_logprobs and req.top_logprobs > 0:
-                    chunk_lp = generate_chat_logprobs([token_text], req.top_logprobs)
+                if (
+                    req.logprobs
+                    and req.top_logprobs
+                    and req.top_logprobs > 0
+                ):
+                    chunk_lp = generate_chat_logprobs(
+                        [token_text], req.top_logprobs,
+                    )
                 chunk = ChatCompletionChunk(
                     id=req_id,
                     created=created,
@@ -1472,7 +1502,8 @@ async def _stream_chat(
 
             # Apply stop sequence truncation before streaming (ensures identical
             # output to non-streaming mode).
-            if req.stop:
+            # Skip stop sequences when response_format produces JSON content.
+            if req.stop and formatted_content is None:
                 text, stopped = _check_stop_sequences(text, req.stop)
                 if stopped:
                     finish_reason = "stop"

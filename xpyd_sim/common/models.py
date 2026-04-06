@@ -173,7 +173,7 @@ class CompletionChunk(BaseModel):
 class EmbeddingData(BaseModel):
     object: str = "embedding"
     index: int = 0
-    embedding: Any = []  # list[float] or base64-encoded string
+    embedding: list[float] | str = []
 
 
 class EmbeddingRequest(BaseModel):

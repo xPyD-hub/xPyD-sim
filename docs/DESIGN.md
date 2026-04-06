@@ -131,10 +131,88 @@ Real models produce variable-length outputs. The simulator mimics this:
 - `ignore_eos: true` → always output full max_tokens
 - Works in both streaming and non-streaming modes
 
-## OpenAI API Compliance
+## API Compliance
 
-- Accept ALL OpenAI API parameters without errors
-- Response JSON format must exactly match OpenAI spec
+xPyD-sim targets two levels of API compatibility:
+
+### Level 1: OpenAI API Spec (Required)
+
+All endpoints must:
+1. Accept ALL parameters defined in the OpenAI API spec without errors
+2. Produce responses that match the spec format — content can be dummy, but structure must be correct
+3. Validate parameter ranges per spec (e.g., temperature 0-2, top_p 0-1) and return 400 on invalid values
+4. Support all parameter behaviors that affect response format (not just accept and ignore)
+
+Specific requirements:
+
+| Feature | Endpoint | Behavior |
+|---|---|---|
+| response_format (json_object) | /v1/chat/completions | Return valid JSON string as content |
+| response_format (json_schema) | /v1/chat/completions | Return JSON conforming to provided schema |
+| max_completion_tokens | /v1/chat/completions | Fallback when max_tokens not set (already implemented) |
+| encoding_format: base64 | /v1/embeddings | Return base64-encoded float vector |
+| Parameter range validation | All | temperature [0,2], top_p (0,1], frequency_penalty [-2,2], presence_penalty [-2,2] |
+
+### Level 2: vLLM Backend Extensions (Required)
+
+xPyD-sim must also accept vLLM-specific parameters so it can serve as a drop-in replacement when testing xPyD-proxy against vLLM backends. These parameters should be accepted without error; behavior can be simulated where practical.
+
+#### Sampling Parameters (accept, simulate where noted)
+
+| Parameter | Type | Behavior |
+|---|---|---|
+| best_of | int | Accept; generate n candidates and return best (or simulate: just return n=1) |
+| use_beam_search | bool | Accept; ignore (sim doesn't do real search) |
+| top_k | int | Accept; ignore |
+| min_p | float | Accept; ignore |
+| repetition_penalty | float | Accept; ignore |
+| length_penalty | float | Accept; ignore |
+| stop_token_ids | list[int] | Accept; ignore (sim uses stop strings) |
+| include_stop_str_in_output | bool | Accept; ignore |
+| min_tokens | int | Accept; ignore |
+| skip_special_tokens | bool | Accept; ignore |
+| spaces_between_special_tokens | bool | Accept; ignore |
+| truncate_prompt_tokens | int | Accept; ignore |
+| prompt_logprobs | int | Accept; return null (sim doesn't track prompt logprobs) |
+| allowed_token_ids | list[int] | Accept; ignore |
+| bad_words | list[str] | Accept; ignore |
+
+#### Extra Parameters (accept and ignore)
+
+| Parameter | Type | Notes |
+|---|---|---|
+| echo | bool | Already implemented for completions; accept for chat too |
+| add_generation_prompt | bool | Accept; ignore |
+| continue_final_message | bool | Accept; ignore |
+| add_special_tokens | bool | Accept; ignore |
+| documents | list[dict] | Accept; ignore (RAG) |
+| chat_template | str | Accept; ignore |
+| chat_template_kwargs | dict | Accept; ignore |
+| mm_processor_kwargs | dict | Accept; ignore |
+| structured_outputs | dict | Accept; ignore (use response_format instead) |
+| priority | int | Accept; ignore |
+| request_id | str | Accept; ignore |
+| return_tokens_as_token_ids | bool | Accept; ignore |
+| return_token_ids | bool | Accept; ignore |
+| cache_salt | str | Accept; ignore |
+| kv_transfer_params | dict | Accept; ignore |
+| vllm_xargs | dict | Accept; ignore |
+| repetition_detection | dict | Accept; ignore |
+| reasoning_effort | str | Accept; ignore |
+| thinking_token_budget | int | Accept; ignore |
+| include_reasoning | bool | Accept; ignore |
+| prompt_embeds | bytes | Accept; ignore |
+
+#### Response Extensions (include in responses)
+
+| Field | Where | Behavior |
+|---|---|---|
+| stop_reason | choices[].stop_reason | null (sim never stops on token IDs) |
+| service_tier | response.service_tier | null |
+| kv_transfer_params | response.kv_transfer_params | null |
+
+### Legacy Notes
+
 - Streaming: first chat chunk delta must include `role: "assistant"`
 - Streaming: final chunk includes `usage` when `stream_options.include_usage` is set
 - All responses include `system_fingerprint`
@@ -560,3 +638,34 @@ scheduling:
 | TC13.10 | /debug/batch shows correct state | All fields accurate |
 | TC13.11 | Request log captures batch events | All events logged correctly |
 | TC13.12 | E2E with proxy: PD disaggregation | Full flow works, TTFT/TPOT correct |
+
+### 14. OpenAI Spec Compliance — Response Format
+| ID | Test | Expected |
+|---|---|---|
+| TC14.1 | response_format: json_object | Content is valid JSON string |
+| TC14.2 | response_format: json_schema with schema | Content conforms to provided JSON schema |
+| TC14.3 | response_format in streaming | Streamed content assembles into valid JSON |
+
+### 15. OpenAI Spec Compliance — Parameter Validation
+| ID | Test | Expected |
+|---|---|---|
+| TC15.1 | temperature=3.0 | HTTP 400, clear error message |
+| TC15.2 | top_p=-0.5 | HTTP 400 |
+| TC15.3 | frequency_penalty=5.0 | HTTP 400 |
+| TC15.4 | presence_penalty=-3.0 | HTTP 400 |
+| TC15.5 | n=0 or n=-1 | HTTP 400 |
+| TC15.6 | best_of < n | HTTP 400 |
+
+### 16. OpenAI Spec Compliance — Embedding base64
+| ID | Test | Expected |
+|---|---|---|
+| TC16.1 | encoding_format=float | Returns list of floats (current behavior) |
+| TC16.2 | encoding_format=base64 | Returns base64-encoded float vector |
+
+### 17. vLLM Backend Compatibility
+| ID | Test | Expected |
+|---|---|---|
+| TC17.1 | All vLLM sampling params accepted | No 422/400 error |
+| TC17.2 | All vLLM extra params accepted | No 422/400 error |
+| TC17.3 | Response includes stop_reason field | null in choices |
+| TC17.4 | Response includes service_tier field | null or absent |

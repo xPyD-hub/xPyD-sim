@@ -34,6 +34,10 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: Optional[bool] = None
     stream_options: Optional[dict] = None
     ignore_eos: Optional[bool] = None
+    best_of: Optional[int] = None
+    echo: Optional[bool] = False
+
+    model_config = {"extra": "allow"}
 
 
 class CompletionRequest(BaseModel):
@@ -55,6 +59,8 @@ class CompletionRequest(BaseModel):
     user: Optional[str] = None
     stream_options: Optional[dict] = None
     ignore_eos: Optional[bool] = None
+
+    model_config = {"extra": "allow"}
 
 
 class UsageInfo(BaseModel):
@@ -85,6 +91,7 @@ class Choice(BaseModel):
     message: ChoiceMessage = Field(default_factory=ChoiceMessage)
     finish_reason: Optional[str] = "stop"
     logprobs: Optional[Any] = None
+    stop_reason: Optional[Any] = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -95,6 +102,8 @@ class ChatCompletionResponse(BaseModel):
     choices: list[Choice] = []
     usage: UsageInfo = Field(default_factory=UsageInfo)
     system_fingerprint: Optional[str] = None
+    service_tier: Optional[str] = None
+    kv_transfer_params: Optional[dict] = None
 
 
 class CompletionChoice(BaseModel):
@@ -102,6 +111,7 @@ class CompletionChoice(BaseModel):
     text: str = ""
     finish_reason: Optional[str] = "stop"
     logprobs: Optional[Any] = None
+    stop_reason: Optional[Any] = None
 
 
 class CompletionResponse(BaseModel):
@@ -112,6 +122,8 @@ class CompletionResponse(BaseModel):
     choices: list[CompletionChoice] = []
     usage: UsageInfo = Field(default_factory=UsageInfo)
     system_fingerprint: Optional[str] = None
+    service_tier: Optional[str] = None
+    kv_transfer_params: Optional[dict] = None
 
 
 class DeltaMessage(BaseModel):
@@ -125,6 +137,7 @@ class StreamChoice(BaseModel):
     delta: DeltaMessage = Field(default_factory=DeltaMessage)
     finish_reason: Optional[str] = None
     logprobs: Optional[Any] = None
+    stop_reason: Optional[Any] = None
 
 
 class ChatCompletionChunk(BaseModel):
@@ -135,6 +148,7 @@ class ChatCompletionChunk(BaseModel):
     choices: list[StreamChoice] = []
     system_fingerprint: Optional[str] = None
     usage: Optional[UsageInfo] = None
+    service_tier: Optional[str] = None
 
 
 class CompletionStreamChoice(BaseModel):
@@ -142,6 +156,7 @@ class CompletionStreamChoice(BaseModel):
     text: str = ""
     finish_reason: Optional[str] = None
     logprobs: Optional[Any] = None
+    stop_reason: Optional[Any] = None
 
 
 class CompletionChunk(BaseModel):
@@ -152,12 +167,13 @@ class CompletionChunk(BaseModel):
     choices: list[CompletionStreamChoice] = []
     system_fingerprint: Optional[str] = None
     usage: Optional[UsageInfo] = None
+    service_tier: Optional[str] = None
 
 
 class EmbeddingData(BaseModel):
     object: str = "embedding"
     index: int = 0
-    embedding: list[float] = []
+    embedding: list[float] | str = []
 
 
 class EmbeddingRequest(BaseModel):

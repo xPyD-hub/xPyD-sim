@@ -6,28 +6,39 @@ import uuid
 from typing import Any
 
 
-def generate_dummy_args(schema: dict) -> dict:
-    """Generate dummy arguments matching a JSON schema."""
-    if not schema or schema.get("type") != "object":
+def generate_dummy_from_schema(schema: dict):
+    """Generate dummy values matching a JSON schema.
+
+    Handles: string, integer, number, boolean, array, object.
+    Supports enum (picks first value) and items (array elements).
+    Does not handle $ref / anyOf / oneOf.
+    """
+    if not schema:
         return {}
-    props = schema.get("properties", {})
-    result = {}
-    for key, prop in props.items():
-        ptype = prop.get("type", "string")
-        if ptype == "string":
-            enum = prop.get("enum")
-            result[key] = enum[0] if enum else "dummy_value"
-        elif ptype == "integer":
-            result[key] = 42
-        elif ptype == "number":
-            result[key] = 3.14
-        elif ptype == "boolean":
-            result[key] = True
-        elif ptype == "array":
-            result[key] = []
-        elif ptype == "object":
-            result[key] = generate_dummy_args(prop)
-    return result
+    schema_type = schema.get("type", "object")
+    enum = schema.get("enum")
+    if enum:
+        return enum[0]
+    if schema_type == "string":
+        return "dummy_value"
+    if schema_type == "integer":
+        return 42
+    if schema_type == "number":
+        return 3.14
+    if schema_type == "boolean":
+        return True
+    if schema_type == "array":
+        items = schema.get("items")
+        if items:
+            return [generate_dummy_from_schema(items)]
+        return []
+    if schema_type == "object":
+        props = schema.get("properties", {})
+        result = {}
+        for key, prop in props.items():
+            result[key] = generate_dummy_from_schema(prop)
+        return result
+    return None
 
 
 def build_tool_calls(
@@ -56,7 +67,7 @@ def build_tool_calls(
         func = t.get("function", {})
         fname = func.get("name", "unknown")
         params = func.get("parameters", {})
-        args = generate_dummy_args(params)
+        args = generate_dummy_from_schema(params)
         result.append({
             "id": f"call_{uuid.uuid4().hex[:24]}",
             "type": "function",

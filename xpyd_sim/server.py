@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import math
 import random
+import struct
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -48,12 +50,54 @@ from xpyd_sim.common.models import (
     ToolCallFunction,
     UsageInfo,
 )
-from xpyd_sim.common.tools import build_tool_calls, should_generate_tool_calls
+from xpyd_sim.common.tools import (
+    build_tool_calls,
+    generate_dummy_from_schema,
+    should_generate_tool_calls,
+)
 from xpyd_sim.observability import Metrics, RequestLogger, WarmupTracker
 from xpyd_sim.profile import LatencyProfile
 from xpyd_sim.scheduler import InferenceRequest, Scheduler, SchedulingConfig
 
 SYSTEM_FINGERPRINT = "fp_xpyd_sim"
+
+
+def _validate_common_params(
+    temperature: float | None,
+    top_p: float | None,
+    frequency_penalty: float | None,
+    presence_penalty: float | None,
+    n: int | None,
+) -> str | None:
+    """Validate common OpenAI parameter ranges. Returns error message or None."""
+    if temperature is not None and not (0 <= temperature <= 2):
+        return f"temperature must be between 0 and 2, got {temperature}"
+    if top_p is not None and not (0 < top_p <= 1):
+        return f"top_p must be between 0 (exclusive) and 1, got {top_p}"
+    if frequency_penalty is not None and not (-2 <= frequency_penalty <= 2):
+        return f"frequency_penalty must be between -2 and 2, got {frequency_penalty}"
+    if presence_penalty is not None and not (-2 <= presence_penalty <= 2):
+        return f"presence_penalty must be between -2 and 2, got {presence_penalty}"
+    if n is not None and n < 1:
+        return f"n must be a positive integer, got {n}"
+    return None
+
+
+def _generate_response_content(
+    response_format: dict | None,
+    num_tokens: int,
+) -> str | None:
+    """Generate content based on response_format. Returns None if no special format."""
+    if not response_format:
+        return None
+    fmt_type = response_format.get("type")
+    if fmt_type == "json_object":
+        return json.dumps({"result": render_dummy_text(num_tokens)})
+    if fmt_type == "json_schema":
+        json_schema = response_format.get("json_schema", {})
+        schema = json_schema.get("schema", {})
+        return json.dumps(generate_dummy_from_schema(schema))
+    return None
 
 
 def _should_use_tool_calls(req: ChatCompletionRequest) -> bool:
@@ -389,7 +433,13 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         data = []
         for i, text in enumerate(inputs):
             vec = [random.gauss(0, 1) for _ in range(config.embedding_dim)]
-            data.append(EmbeddingData(index=i, embedding=vec))
+            # Support base64 encoding format
+            if req.encoding_format == "base64":
+                packed = struct.pack(f'<{len(vec)}f', *vec)
+                embedding_value = base64.b64encode(packed).decode('ascii')
+            else:
+                embedding_value = vec
+            data.append(EmbeddingData(index=i, embedding=embedding_value))
 
         return EmbeddingResponse(
             data=data,
@@ -436,6 +486,34 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     status_code=400,
                     content={"error": {"message": str(e), "type": "invalid_request_error"}},
                 )
+
+            # Validate parameter ranges (OpenAI spec)
+            param_err = _validate_common_params(
+                req.temperature, req.top_p, req.frequency_penalty,
+                req.presence_penalty, req.n,
+            )
+            if param_err:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": {"message": param_err, "type": "invalid_request_error"}},
+                )
+
+            best_of = getattr(req, 'best_of', None)
+            if best_of is not None:
+                n_val = req.n or 1
+                if best_of < n_val:
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "error": {
+                                "message": (
+                                    f"best_of must be >= n, got "
+                                    f"best_of={best_of} n={n_val}"
+                                ),
+                                "type": "invalid_request_error",
+                            }
+                        },
+                    )
 
             prompt_tokens = count_prompt_tokens(messages=req.messages)
             max_tokens = get_effective_max_tokens(req.max_completion_tokens, req.max_tokens)
@@ -520,11 +598,21 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     num_tokens, finish_reason = _compute_output_length(
                         max_tokens, config.eos_min_ratio, ignore_eos
                     )
-                    text = render_dummy_text(num_tokens)
-                    text, stopped = _check_stop_sequences(text, req.stop)
-                    if stopped:
-                        finish_reason = "stop"
-                        num_tokens = max(1, len(text.split()))
+                    # Check for response_format (json_object / json_schema)
+                    formatted_content = _generate_response_content(
+                        req.response_format, num_tokens,
+                    )
+                    if formatted_content is not None:
+                        text = formatted_content
+                    else:
+                        text = render_dummy_text(num_tokens)
+                    if formatted_content is None:
+                        text, stopped = _check_stop_sequences(
+                            text, req.stop,
+                        )
+                        if stopped:
+                            finish_reason = "stop"
+                            num_tokens = max(1, len(text.split()))
                     total_completion += num_tokens
                     max_choice_tokens = max(max_choice_tokens, num_tokens)
                     lp_data = None
@@ -601,6 +689,32 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
                     status_code=400,
                     content={"error": {"message": str(e), "type": "invalid_request_error"}},
                 )
+
+            # Validate parameter ranges (OpenAI spec)
+            param_err = _validate_common_params(
+                req.temperature, req.top_p, req.frequency_penalty,
+                req.presence_penalty, req.n,
+            )
+            if param_err:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": {"message": param_err, "type": "invalid_request_error"}},
+                )
+            if req.best_of is not None:
+                n_val = req.n or 1
+                if req.best_of < n_val:
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "error": {
+                                "message": (
+                                    f"best_of must be >= n, got "
+                                    f"best_of={req.best_of} n={n_val}"
+                                ),
+                                "type": "invalid_request_error",
+                            }
+                        },
+                    )
 
             prompt_tokens = count_prompt_tokens(prompt=req.prompt)
             max_tokens = get_effective_max_tokens(req.max_tokens)
@@ -792,13 +906,23 @@ async def _non_stream_chat_scheduled(
                 )
             )
         else:
-            text = render_dummy_text(inf_req.generated_tokens)
-            text, stopped = _check_stop_sequences(text, req.stop)
+            formatted = _generate_response_content(
+                req.response_format,
+                inf_req.generated_tokens,
+            )
+            if formatted is not None:
+                text = formatted
+            else:
+                text = render_dummy_text(inf_req.generated_tokens)
             finish_reason = inf_req.finish_reason
             num_tokens = inf_req.generated_tokens
-            if stopped:
-                finish_reason = "stop"
-                num_tokens = max(1, len(text.split()))
+            if formatted is None:
+                text, stopped = _check_stop_sequences(
+                    text, req.stop,
+                )
+                if stopped:
+                    finish_reason = "stop"
+                    num_tokens = max(1, len(text.split()))
             total_completion += num_tokens
 
             lp_data = None
@@ -954,10 +1078,19 @@ async def _stream_chat_scheduled(
                 token_count += 1
 
             # Build full text, apply stop truncation, then stream
-            text = render_dummy_text(token_count)
+            formatted = _generate_response_content(
+                req.response_format, token_count,
+            )
+            if formatted is not None:
+                text = formatted
+            else:
+                text = render_dummy_text(token_count)
             finish_reason_override = None
-            if req.stop:
-                text, was_stopped = _check_stop_sequences(text, req.stop)
+            # Skip stop sequences when response_format is JSON
+            if req.stop and formatted is None:
+                text, was_stopped = _check_stop_sequences(
+                    text, req.stop,
+                )
                 if was_stopped:
                     finish_reason_override = "stop"
 
@@ -965,8 +1098,14 @@ async def _stream_chat_scheduled(
             for i, token in enumerate(tokens):
                 token_text = (" " + token) if i > 0 else token
                 chunk_lp = None
-                if req.logprobs and req.top_logprobs and req.top_logprobs > 0:
-                    chunk_lp = generate_chat_logprobs([token_text], req.top_logprobs)
+                if (
+                    req.logprobs
+                    and req.top_logprobs
+                    and req.top_logprobs > 0
+                ):
+                    chunk_lp = generate_chat_logprobs(
+                        [token_text], req.top_logprobs,
+                    )
                 chunk = ChatCompletionChunk(
                     id=req_id,
                     created=created,
@@ -1336,7 +1475,14 @@ async def _stream_chat(
             num_tokens, finish_reason = _compute_output_length(
                 max_tokens, config.eos_min_ratio, ignore_eos
             )
-            text = render_dummy_text(num_tokens)
+            # Check for response_format (json_object / json_schema)
+            formatted_content = _generate_response_content(
+                req.response_format, num_tokens,
+            )
+            if formatted_content is not None:
+                text = formatted_content
+            else:
+                text = render_dummy_text(num_tokens)
 
             # First chunk: role
             chunk = ChatCompletionChunk(
@@ -1356,7 +1502,8 @@ async def _stream_chat(
 
             # Apply stop sequence truncation before streaming (ensures identical
             # output to non-streaming mode).
-            if req.stop:
+            # Skip stop sequences when response_format produces JSON content.
+            if req.stop and formatted_content is None:
                 text, stopped = _check_stop_sequences(text, req.stop)
                 if stopped:
                     finish_reason = "stop"

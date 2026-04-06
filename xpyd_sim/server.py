@@ -745,13 +745,31 @@ async def _non_stream_chat_scheduled(
     for i in range(n):
         tc_result = _build_tool_call_response(req)
 
+        # Always go through the scheduler for proper queuing/metrics
+        inf_req = InferenceRequest(
+            request_id=generate_id("req"),
+            input_tokens=prompt_tokens,
+            max_tokens=max_tokens,
+            eos_min_ratio=config.eos_min_ratio,
+            ignore_eos=ignore_eos,
+        )
+        await scheduler.submit(inf_req)
+        await inf_req.done_event.wait()
+
+        # Drain token queue
+        tokens_received = 0
+        while not inf_req.token_queue.empty():
+            msg_type, _payload = inf_req.token_queue.get_nowait()
+            if msg_type == "token":
+                tokens_received += 1
+            elif msg_type == "error":
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": {"message": _payload, "type": "invalid_request_error"}},
+                )
+
         if tc_result:
             tool_call_objects, tc_tokens, _ = tc_result
-            # Simulate prefill + decode delay for tool call
-            prefill_delay = _compute_prefill_delay(config, prompt_tokens)
-            kv_delay = _compute_kv_delay(config, prompt_tokens)
-            decode_delay = _compute_decode_delay(config)
-            await asyncio.sleep(prefill_delay + kv_delay + decode_delay * tc_tokens)
             total_completion += tc_tokens
             choices.append(
                 Choice(
@@ -766,29 +784,6 @@ async def _non_stream_chat_scheduled(
                 )
             )
         else:
-            inf_req = InferenceRequest(
-                request_id=generate_id("req"),
-                input_tokens=prompt_tokens,
-                max_tokens=max_tokens,
-                eos_min_ratio=config.eos_min_ratio,
-                ignore_eos=ignore_eos,
-            )
-            await scheduler.submit(inf_req)
-            # Wait for completion
-            await inf_req.done_event.wait()
-
-            # Drain token queue
-            tokens_received = 0
-            while not inf_req.token_queue.empty():
-                msg_type, _ = inf_req.token_queue.get_nowait()
-                if msg_type == "token":
-                    tokens_received += 1
-                elif msg_type == "error":
-                    return JSONResponse(
-                        status_code=400,
-                        content={"error": {"message": _, "type": "invalid_request_error"}},
-                    )
-
             text = render_dummy_text(inf_req.generated_tokens)
             text, stopped = _check_stop_sequences(text, req.stop)
             finish_reason = inf_req.finish_reason
@@ -849,10 +844,23 @@ async def _stream_chat_scheduled(
 
     for idx in range(n):
         tc_result = _build_tool_call_response(req)
+
+        # Always go through the scheduler for proper queuing/metrics
+        inf_req = InferenceRequest(
+            request_id=generate_id("req"),
+            input_tokens=prompt_tokens,
+            max_tokens=max_tokens,
+            eos_min_ratio=config.eos_min_ratio,
+            ignore_eos=ignore_eos,
+        )
+        await scheduler.submit(inf_req)
+
         if tc_result:
-            tool_call_objects, tc_tokens, tool_calls_data = tc_result
-            # Simulate decode delay for tool call chunks
-            await asyncio.sleep(decode_delay)
+            _, tc_tokens, tool_calls_data = tc_result
+            # Wait for scheduler to complete (for timing/queuing)
+            await inf_req.done_event.wait()
+            while not inf_req.token_queue.empty():
+                inf_req.token_queue.get_nowait()
             tc_deltas = []
             for ti, tc in enumerate(tool_calls_data):
                 tc_deltas.append({
@@ -908,15 +916,6 @@ async def _stream_chat_scheduled(
             )
             yield f"data: {chunk.model_dump_json()}\n\n"
         else:
-            inf_req = InferenceRequest(
-                request_id=generate_id("req"),
-                input_tokens=prompt_tokens,
-                max_tokens=max_tokens,
-                eos_min_ratio=config.eos_min_ratio,
-                ignore_eos=ignore_eos,
-            )
-            await scheduler.submit(inf_req)
-
             # First chunk: role
             chunk = ChatCompletionChunk(
                 id=req_id,
@@ -1253,11 +1252,7 @@ async def _stream_chat(
     for idx in range(n):
         tc_result = _build_tool_call_response(req)
         if tc_result:
-            tool_call_objects, tc_tokens, tool_calls_data = tc_result
-            # Simulate prefill delay before first chunk
-            prefill_delay = _compute_prefill_delay(config, prompt_tokens)
-            kv_delay = _compute_kv_delay(config, prompt_tokens)
-            await asyncio.sleep(prefill_delay + kv_delay)
+            _, tc_tokens, tool_calls_data = tc_result
             # First chunk: role + tool_calls
             tc_deltas = []
             for ti, tc in enumerate(tool_calls_data):

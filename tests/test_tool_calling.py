@@ -1,5 +1,6 @@
 """Test tool calling support for vLLM compatibility."""
 import json
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -41,11 +42,12 @@ def _cfg():
 
 class TestToolCalling:
     def test_tool_calls_in_response(self):
-        """When tools provided, response has tool_calls."""
+        """When tools provided with tool_choice=required, response has tool_calls."""
         with TestClient(create_app(_cfg())) as c:
             r = c.post("/v1/chat/completions", json={
                 "messages": [{"role": "user", "content": "weather in tokyo"}],
                 "tools": TOOLS,
+                "tool_choice": "required",
                 "max_tokens": 50,
             })
             assert r.status_code == 200
@@ -100,11 +102,12 @@ class TestToolCalling:
             assert d["choices"][0]["message"].get("tool_calls") is None
 
     def test_streaming_tool_calls(self):
-        """Streaming with tools should include tool_calls in delta."""
+        """Streaming with tools and tool_choice=required should include tool_calls in delta."""
         with TestClient(create_app(_cfg())) as c:
             r = c.post("/v1/chat/completions", json={
                 "messages": [{"role": "user", "content": "weather"}],
                 "tools": TOOLS,
+                "tool_choice": "required",
                 "max_tokens": 50,
                 "stream": True,
             })
@@ -125,6 +128,7 @@ class TestToolCalling:
             r = c.post("/v1/chat/completions", json={
                 "messages": [{"role": "user", "content": "weather"}],
                 "tools": TOOLS,
+                "tool_choice": "required",
                 "max_tokens": 50,
             })
             u = r.json()["usage"]
@@ -137,8 +141,38 @@ class TestToolCalling:
             r = c.post("/v1/chat/completions", json={
                 "messages": [{"role": "user", "content": "weather"}],
                 "tools": TOOLS,
+                "tool_choice": "required",
                 "max_tokens": 50,
             })
             tc = r.json()["choices"][0]["message"]["tool_calls"][0]
             args = json.loads(tc["function"]["arguments"])
             assert isinstance(args, dict)
+
+    def test_tool_choice_auto_can_return_text(self):
+        """tool_choice=auto (or None) should sometimes return text."""
+        with patch("xpyd_sim.common.tools.random.random", return_value=0.9):
+            with TestClient(create_app(_cfg())) as c:
+                r = c.post("/v1/chat/completions", json={
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "tools": TOOLS,
+                    "max_tokens": 10,
+                })
+                d = r.json()
+                choice = d["choices"][0]
+                assert choice["message"]["content"] is not None
+                assert choice["message"].get("tool_calls") is None
+                assert choice["finish_reason"] in ("stop", "length")
+
+    def test_tool_choice_required_always_returns_tool_calls(self):
+        """tool_choice=required should always generate tool_calls."""
+        with TestClient(create_app(_cfg())) as c:
+            for _ in range(5):
+                r = c.post("/v1/chat/completions", json={
+                    "messages": [{"role": "user", "content": "weather"}],
+                    "tools": TOOLS,
+                    "tool_choice": "required",
+                    "max_tokens": 50,
+                })
+                d = r.json()
+                assert d["choices"][0]["finish_reason"] == "tool_calls"
+                assert d["choices"][0]["message"]["tool_calls"] is not None

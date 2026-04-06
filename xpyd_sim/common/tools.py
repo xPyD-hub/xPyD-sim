@@ -1,6 +1,7 @@
 """Synthetic tool call generation."""
 
 import json
+import random
 import uuid
 from typing import Any
 
@@ -71,4 +72,10 @@ def should_generate_tool_calls(
     tools: list | None, tool_choice: Any,
 ) -> bool:
     """Determine if we should generate tool calls instead of text."""
-    return bool(tools) and tool_choice != "none"
+    if not tools or tool_choice == "none":
+        return False
+    # Specific function dict or "required" → always generate
+    if isinstance(tool_choice, dict) or tool_choice == "required":
+        return True
+    # "auto" or None → 50% chance (realistic model behavior)
+    return random.random() < 0.5

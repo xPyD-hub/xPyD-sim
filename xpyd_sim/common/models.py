@@ -31,6 +31,7 @@ class ChatCompletionRequest(BaseModel):
     response_format: Optional[dict] = None
     tools: Optional[list] = None
     tool_choice: Optional[Any] = None
+    parallel_tool_calls: Optional[bool] = None
     stream_options: Optional[dict] = None
     ignore_eos: Optional[bool] = None
 
@@ -62,9 +63,21 @@ class UsageInfo(BaseModel):
     total_tokens: int = 0
 
 
+class ToolCallFunction(BaseModel):
+    name: str = ""
+    arguments: str = ""
+
+
+class ToolCall(BaseModel):
+    id: str = ""
+    type: str = "function"
+    function: ToolCallFunction = Field(default_factory=ToolCallFunction)
+
+
 class ChoiceMessage(BaseModel):
     role: str = "assistant"
-    content: str = ""
+    content: Optional[str] = ""
+    tool_calls: Optional[list[ToolCall]] = None
 
 
 class Choice(BaseModel):
@@ -104,6 +117,7 @@ class CompletionResponse(BaseModel):
 class DeltaMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    tool_calls: Optional[list[dict]] = None
 
 
 class StreamChoice(BaseModel):

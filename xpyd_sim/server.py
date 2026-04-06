@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import random
 import time
@@ -43,13 +44,50 @@ from xpyd_sim.common.models import (
     ModelCard,
     ModelListResponse,
     StreamChoice,
+    ToolCall,
+    ToolCallFunction,
     UsageInfo,
 )
+from xpyd_sim.common.tools import build_tool_calls, should_generate_tool_calls
 from xpyd_sim.observability import Metrics, RequestLogger, WarmupTracker
 from xpyd_sim.profile import LatencyProfile
 from xpyd_sim.scheduler import InferenceRequest, Scheduler, SchedulingConfig
 
 SYSTEM_FINGERPRINT = "fp_xpyd_sim"
+
+
+def _should_use_tool_calls(req: ChatCompletionRequest) -> bool:
+    """Decide once per request whether to generate tool calls."""
+    tools = getattr(req, "tools", None)
+    choice = getattr(req, "tool_choice", None)
+    return should_generate_tool_calls(tools, choice)
+
+
+def _build_tool_call_response(req: ChatCompletionRequest):
+    """Build tool call objects and estimate tokens.
+
+    Returns (tool_call_objects, num_tokens, tool_calls_data).
+    Caller must check _should_use_tool_calls() first.
+    """
+    tool_calls_data = build_tool_calls(
+        req.tools,
+        req.tool_choice,
+        getattr(req, 'parallel_tool_calls', None),
+    )
+    tc_json = json.dumps(tool_calls_data)
+    num_tokens = max(1, len(tc_json) // 4)
+    tool_call_objects = [
+        ToolCall(
+            id=tc["id"],
+            type=tc["type"],
+            function=ToolCallFunction(
+                name=tc["function"]["name"],
+                arguments=tc["function"]["arguments"],
+            ),
+        )
+        for tc in tool_calls_data
+    ]
+    return tool_call_objects, num_tokens, tool_calls_data
 
 
 @dataclass
@@ -457,29 +495,50 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             choices = []
             total_completion = 0
             max_choice_tokens = 0
+
+            # Decide tool-call vs text once per request (not per choice)
+            use_tool_calls = _should_use_tool_calls(req)
+
             for i in range(n):
-                num_tokens, finish_reason = _compute_output_length(
-                    max_tokens, config.eos_min_ratio, ignore_eos
-                )
-                text = render_dummy_text(num_tokens)
-                text, stopped = _check_stop_sequences(text, req.stop)
-                if stopped:
-                    finish_reason = "stop"
-                    num_tokens = max(1, len(text.split()))
-                total_completion += num_tokens
-                max_choice_tokens = max(max_choice_tokens, num_tokens)
-                lp_data = None
-                if req.logprobs:
-                    top_n = req.top_logprobs or 5
-                    lp_data = generate_chat_logprobs(tokenize_text(text), top_n)
-                choices.append(
-                    Choice(
-                        index=i,
-                        message=ChoiceMessage(role="assistant", content=text),
-                        finish_reason=finish_reason,
-                        logprobs=lp_data,
+                if use_tool_calls:
+                    tool_call_objects, tc_tokens, _ = _build_tool_call_response(req)
+                    total_completion += tc_tokens
+                    max_choice_tokens = max(max_choice_tokens, tc_tokens)
+                    choices.append(
+                        Choice(
+                            index=i,
+                            message=ChoiceMessage(
+                                role="assistant",
+                                content=None,
+                                tool_calls=tool_call_objects,
+                            ),
+                            finish_reason="tool_calls",
+                            logprobs=None,
+                        )
                     )
-                )
+                else:
+                    num_tokens, finish_reason = _compute_output_length(
+                        max_tokens, config.eos_min_ratio, ignore_eos
+                    )
+                    text = render_dummy_text(num_tokens)
+                    text, stopped = _check_stop_sequences(text, req.stop)
+                    if stopped:
+                        finish_reason = "stop"
+                        num_tokens = max(1, len(text.split()))
+                    total_completion += num_tokens
+                    max_choice_tokens = max(max_choice_tokens, num_tokens)
+                    lp_data = None
+                    if req.logprobs:
+                        top_n = req.top_logprobs or 5
+                        lp_data = generate_chat_logprobs(tokenize_text(text), top_n)
+                    choices.append(
+                        Choice(
+                            index=i,
+                            message=ChoiceMessage(role="assistant", content=text),
+                            finish_reason=finish_reason,
+                            logprobs=lp_data,
+                        )
+                    )
 
             # Simulate decode delay (parallel across n choices)
             decode_delay = _compute_decode_delay(config)
@@ -689,7 +748,11 @@ async def _non_stream_chat_scheduled(
     choices = []
     total_completion = 0
 
+    # Decide tool-call vs text once per request (not per choice)
+    use_tool_calls = _should_use_tool_calls(req)
+
     for i in range(n):
+        # Always go through the scheduler for proper queuing/metrics
         inf_req = InferenceRequest(
             request_id=generate_id("req"),
             input_tokens=prompt_tokens,
@@ -698,43 +761,59 @@ async def _non_stream_chat_scheduled(
             ignore_eos=ignore_eos,
         )
         await scheduler.submit(inf_req)
-        # Wait for completion
         await inf_req.done_event.wait()
 
         # Drain token queue
         tokens_received = 0
         while not inf_req.token_queue.empty():
-            msg_type, _ = inf_req.token_queue.get_nowait()
+            msg_type, _payload = inf_req.token_queue.get_nowait()
             if msg_type == "token":
                 tokens_received += 1
             elif msg_type == "error":
                 return JSONResponse(
                     status_code=400,
-                    content={"error": {"message": _, "type": "invalid_request_error"}},
+                    content={"error": {"message": _payload, "type": "invalid_request_error"}},
                 )
 
-        text = render_dummy_text(inf_req.generated_tokens)
-        text, stopped = _check_stop_sequences(text, req.stop)
-        finish_reason = inf_req.finish_reason
-        num_tokens = inf_req.generated_tokens
-        if stopped:
-            finish_reason = "stop"
-            num_tokens = max(1, len(text.split()))
-        total_completion += num_tokens
-
-        lp_data = None
-        if req.logprobs:
-            top_n = req.top_logprobs or 5
-            lp_data = generate_chat_logprobs(tokenize_text(text), top_n)
-
-        choices.append(
-            Choice(
-                index=i,
-                message=ChoiceMessage(role="assistant", content=text),
-                finish_reason=finish_reason,
-                logprobs=lp_data,
+        if use_tool_calls:
+            tool_call_objects, _, _ = _build_tool_call_response(req)
+            # Use scheduler's generated_tokens for consistent metrics
+            total_completion += inf_req.generated_tokens
+            choices.append(
+                Choice(
+                    index=i,
+                    message=ChoiceMessage(
+                        role="assistant",
+                        content=None,
+                        tool_calls=tool_call_objects,
+                    ),
+                    finish_reason="tool_calls",
+                    logprobs=None,
+                )
             )
-        )
+        else:
+            text = render_dummy_text(inf_req.generated_tokens)
+            text, stopped = _check_stop_sequences(text, req.stop)
+            finish_reason = inf_req.finish_reason
+            num_tokens = inf_req.generated_tokens
+            if stopped:
+                finish_reason = "stop"
+                num_tokens = max(1, len(text.split()))
+            total_completion += num_tokens
+
+            lp_data = None
+            if req.logprobs:
+                top_n = req.top_logprobs or 5
+                lp_data = generate_chat_logprobs(tokenize_text(text), top_n)
+
+            choices.append(
+                Choice(
+                    index=i,
+                    message=ChoiceMessage(role="assistant", content=text),
+                    finish_reason=finish_reason,
+                    logprobs=lp_data,
+                )
+            )
 
     config._metrics.inc_tokens(total_completion)
 
@@ -768,9 +847,14 @@ async def _stream_chat_scheduled(
     req_id = generate_id("chatcmpl")
     created = now_ts()
     include_usage = req.stream_options.get("include_usage", False) if req.stream_options else False
+    decode_delay = _compute_decode_delay(config)
     total_completion = 0
 
+    # Decide tool-call vs text once per request (not per choice)
+    use_tool_calls = _should_use_tool_calls(req)
+
     for idx in range(n):
+        # Always go through the scheduler for proper queuing/metrics
         inf_req = InferenceRequest(
             request_id=generate_id("req"),
             input_tokens=prompt_tokens,
@@ -780,47 +864,69 @@ async def _stream_chat_scheduled(
         )
         await scheduler.submit(inf_req)
 
-        # First chunk: role
-        chunk = ChatCompletionChunk(
-            id=req_id,
-            created=created,
-            model=config.model_name,
-            choices=[
-                StreamChoice(
-                    index=idx,
-                    delta=DeltaMessage(role="assistant", content=""),
-                    logprobs=None,
-                )
-            ],
-            system_fingerprint=SYSTEM_FINGERPRINT,
-        )
-        yield f"data: {chunk.model_dump_json()}\n\n"
-
-        # Collect all tokens from scheduler first, then apply stop
-        # truncation and stream the safe output.
-        token_count = 0
-        while True:
-            msg_type, value = await inf_req.token_queue.get()
-            if msg_type == "error":
-                break
-            if msg_type == "done":
-                break
-            token_count += 1
-
-        # Build full text, apply stop truncation, then stream
-        text = render_dummy_text(token_count)
-        finish_reason_override = None
-        if req.stop:
-            text, was_stopped = _check_stop_sequences(text, req.stop)
-            if was_stopped:
-                finish_reason_override = "stop"
-
-        tokens = text.split(" ") if text else []
-        for i, token in enumerate(tokens):
-            token_text = (" " + token) if i > 0 else token
-            chunk_lp = None
-            if req.logprobs and req.top_logprobs and req.top_logprobs > 0:
-                chunk_lp = generate_chat_logprobs([token_text], req.top_logprobs)
+        if use_tool_calls:
+            _, _, tool_calls_data = _build_tool_call_response(req)
+            # Wait for scheduler to complete (for timing/queuing)
+            await inf_req.done_event.wait()
+            while not inf_req.token_queue.empty():
+                inf_req.token_queue.get_nowait()
+            tc_deltas = []
+            for ti, tc in enumerate(tool_calls_data):
+                tc_deltas.append({
+                    "index": ti,
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {"name": tc["function"]["name"], "arguments": ""},
+                })
+            sc = StreamChoice(
+                index=idx,
+                delta=DeltaMessage(
+                    role="assistant", tool_calls=tc_deltas,
+                ),
+                logprobs=None,
+            )
+            chunk = ChatCompletionChunk(
+                id=req_id, created=created, model=config.model_name,
+                choices=[sc],
+                system_fingerprint=SYSTEM_FINGERPRINT,
+            )
+            yield f"data: {chunk.model_dump_json()}\n\n"
+            await asyncio.sleep(decode_delay)
+            arg_deltas = []
+            for ti, tc in enumerate(tool_calls_data):
+                arg_deltas.append({
+                    "index": ti,
+                    "function": {
+                        "arguments": tc["function"]["arguments"],
+                    },
+                })
+            sc = StreamChoice(
+                index=idx,
+                delta=DeltaMessage(tool_calls=arg_deltas),
+                logprobs=None,
+            )
+            chunk = ChatCompletionChunk(
+                id=req_id, created=created, model=config.model_name,
+                choices=[sc],
+                system_fingerprint=SYSTEM_FINGERPRINT,
+            )
+            yield f"data: {chunk.model_dump_json()}\n\n"
+            # Use scheduler's generated_tokens for consistent metrics
+            total_completion += inf_req.generated_tokens
+            sc = StreamChoice(
+                index=idx,
+                delta=DeltaMessage(),
+                finish_reason="tool_calls",
+                logprobs=None,
+            )
+            chunk = ChatCompletionChunk(
+                id=req_id, created=created, model=config.model_name,
+                choices=[sc],
+                system_fingerprint=SYSTEM_FINGERPRINT,
+            )
+            yield f"data: {chunk.model_dump_json()}\n\n"
+        else:
+            # First chunk: role
             chunk = ChatCompletionChunk(
                 id=req_id,
                 created=created,
@@ -828,35 +934,75 @@ async def _stream_chat_scheduled(
                 choices=[
                     StreamChoice(
                         index=idx,
-                        delta=DeltaMessage(content=token_text),
-                        logprobs=chunk_lp,
+                        delta=DeltaMessage(role="assistant", content=""),
+                        logprobs=None,
                     )
                 ],
                 system_fingerprint=SYSTEM_FINGERPRINT,
             )
             yield f"data: {chunk.model_dump_json()}\n\n"
-            total_completion += 1
 
-        # Finish chunk
-        if finish_reason_override:
-            finish_reason = finish_reason_override
-        else:
-            finish_reason = inf_req.finish_reason if inf_req.is_done() else "stop"
-        chunk = ChatCompletionChunk(
-            id=req_id,
-            created=created,
-            model=config.model_name,
-            choices=[
-                StreamChoice(
-                    index=idx,
-                    delta=DeltaMessage(),
-                    finish_reason=finish_reason,
-                    logprobs=None,
+            # Collect all tokens from scheduler first, then apply stop
+            # truncation and stream the safe output.
+            token_count = 0
+            while True:
+                msg_type, value = await inf_req.token_queue.get()
+                if msg_type == "error":
+                    break
+                if msg_type == "done":
+                    break
+                token_count += 1
+
+            # Build full text, apply stop truncation, then stream
+            text = render_dummy_text(token_count)
+            finish_reason_override = None
+            if req.stop:
+                text, was_stopped = _check_stop_sequences(text, req.stop)
+                if was_stopped:
+                    finish_reason_override = "stop"
+
+            tokens = text.split(" ") if text else []
+            for i, token in enumerate(tokens):
+                token_text = (" " + token) if i > 0 else token
+                chunk_lp = None
+                if req.logprobs and req.top_logprobs and req.top_logprobs > 0:
+                    chunk_lp = generate_chat_logprobs([token_text], req.top_logprobs)
+                chunk = ChatCompletionChunk(
+                    id=req_id,
+                    created=created,
+                    model=config.model_name,
+                    choices=[
+                        StreamChoice(
+                            index=idx,
+                            delta=DeltaMessage(content=token_text),
+                            logprobs=chunk_lp,
+                        )
+                    ],
+                    system_fingerprint=SYSTEM_FINGERPRINT,
                 )
-            ],
-            system_fingerprint=SYSTEM_FINGERPRINT,
-        )
-        yield f"data: {chunk.model_dump_json()}\n\n"
+                yield f"data: {chunk.model_dump_json()}\n\n"
+                total_completion += 1
+
+            # Finish chunk
+            if finish_reason_override:
+                finish_reason = finish_reason_override
+            else:
+                finish_reason = inf_req.finish_reason if inf_req.is_done() else "stop"
+            chunk = ChatCompletionChunk(
+                id=req_id,
+                created=created,
+                model=config.model_name,
+                choices=[
+                    StreamChoice(
+                        index=idx,
+                        delta=DeltaMessage(),
+                        finish_reason=finish_reason,
+                        logprobs=None,
+                    )
+                ],
+                system_fingerprint=SYSTEM_FINGERPRINT,
+            )
+            yield f"data: {chunk.model_dump_json()}\n\n"
 
     config._metrics.inc_tokens(total_completion)
 
@@ -1113,44 +1259,23 @@ async def _stream_chat(
     decode_delay = _compute_decode_delay(config)
     total_completion = 0
 
+    # Decide tool-call vs text once per request (not per choice)
+    use_tool_calls = _should_use_tool_calls(req)
+
     for idx in range(n):
-        num_tokens, finish_reason = _compute_output_length(
-            max_tokens, config.eos_min_ratio, ignore_eos
-        )
-        text = render_dummy_text(num_tokens)
-
-        # First chunk: role
-        chunk = ChatCompletionChunk(
-            id=req_id,
-            created=created,
-            model=config.model_name,
-            choices=[
-                StreamChoice(
-                    index=idx,
-                    delta=DeltaMessage(role="assistant", content=""),
-                    logprobs=None,
-                )
-            ],
-            system_fingerprint=SYSTEM_FINGERPRINT,
-        )
-        yield f"data: {chunk.model_dump_json()}\n\n"
-
-        # Apply stop sequence truncation before streaming (ensures identical
-        # output to non-streaming mode).
-        if req.stop:
-            text, stopped = _check_stop_sequences(text, req.stop)
-            if stopped:
-                finish_reason = "stop"
-
-        # Content chunks (per token)
-        tokens = text.split(" ") if text else []
-        for i, token in enumerate(tokens):
-            await asyncio.sleep(decode_delay)
-            # Generate per-token logprobs for chat streaming
-            token_text = (" " + token) if i > 0 else token
-            chunk_lp = None
-            if req.logprobs and req.top_logprobs and req.top_logprobs > 0:
-                chunk_lp = generate_chat_logprobs([token_text], req.top_logprobs)
+        if use_tool_calls:
+            _, tc_tokens, tool_calls_data = _build_tool_call_response(req)
+            # Note: prefill + KV delay already applied in chat_completions()
+            # before this generator is called; no additional delay needed here.
+            # First chunk: role + tool_calls
+            tc_deltas = []
+            for ti, tc in enumerate(tool_calls_data):
+                tc_deltas.append({
+                    "index": ti,
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {"name": tc["function"]["name"], "arguments": ""},
+                })
             chunk = ChatCompletionChunk(
                 id=req_id,
                 created=created,
@@ -1158,32 +1283,126 @@ async def _stream_chat(
                 choices=[
                     StreamChoice(
                         index=idx,
-                        delta=DeltaMessage(content=token_text),
-                        logprobs=chunk_lp,
+                        delta=DeltaMessage(role="assistant", tool_calls=tc_deltas),
+                        logprobs=None,
                     )
                 ],
                 system_fingerprint=SYSTEM_FINGERPRINT,
             )
             yield f"data: {chunk.model_dump_json()}\n\n"
 
-        total_completion += len(tokens)
+            # Arguments chunk
+            await asyncio.sleep(decode_delay)
+            arg_deltas = []
+            for ti, tc in enumerate(tool_calls_data):
+                arg_deltas.append({
+                    "index": ti,
+                    "function": {"arguments": tc["function"]["arguments"]},
+                })
+            chunk = ChatCompletionChunk(
+                id=req_id,
+                created=created,
+                model=config.model_name,
+                choices=[
+                    StreamChoice(
+                        index=idx,
+                        delta=DeltaMessage(tool_calls=arg_deltas),
+                        logprobs=None,
+                    )
+                ],
+                system_fingerprint=SYSTEM_FINGERPRINT,
+            )
+            yield f"data: {chunk.model_dump_json()}\n\n"
 
-        # Finish chunk
-        chunk = ChatCompletionChunk(
-            id=req_id,
-            created=created,
-            model=config.model_name,
-            choices=[
-                StreamChoice(
-                    index=idx,
-                    delta=DeltaMessage(),
-                    finish_reason=finish_reason,
-                    logprobs=None,
+            total_completion += tc_tokens
+
+            # Finish chunk
+            chunk = ChatCompletionChunk(
+                id=req_id,
+                created=created,
+                model=config.model_name,
+                choices=[
+                    StreamChoice(
+                        index=idx,
+                        delta=DeltaMessage(),
+                        finish_reason="tool_calls",
+                        logprobs=None,
+                    )
+                ],
+                system_fingerprint=SYSTEM_FINGERPRINT,
+            )
+            yield f"data: {chunk.model_dump_json()}\n\n"
+        else:
+            num_tokens, finish_reason = _compute_output_length(
+                max_tokens, config.eos_min_ratio, ignore_eos
+            )
+            text = render_dummy_text(num_tokens)
+
+            # First chunk: role
+            chunk = ChatCompletionChunk(
+                id=req_id,
+                created=created,
+                model=config.model_name,
+                choices=[
+                    StreamChoice(
+                        index=idx,
+                        delta=DeltaMessage(role="assistant", content=""),
+                        logprobs=None,
+                    )
+                ],
+                system_fingerprint=SYSTEM_FINGERPRINT,
+            )
+            yield f"data: {chunk.model_dump_json()}\n\n"
+
+            # Apply stop sequence truncation before streaming (ensures identical
+            # output to non-streaming mode).
+            if req.stop:
+                text, stopped = _check_stop_sequences(text, req.stop)
+                if stopped:
+                    finish_reason = "stop"
+
+            # Content chunks (per token)
+            tokens = text.split(" ") if text else []
+            for i, token in enumerate(tokens):
+                await asyncio.sleep(decode_delay)
+                # Generate per-token logprobs for chat streaming
+                token_text = (" " + token) if i > 0 else token
+                chunk_lp = None
+                if req.logprobs and req.top_logprobs and req.top_logprobs > 0:
+                    chunk_lp = generate_chat_logprobs([token_text], req.top_logprobs)
+                chunk = ChatCompletionChunk(
+                    id=req_id,
+                    created=created,
+                    model=config.model_name,
+                    choices=[
+                        StreamChoice(
+                            index=idx,
+                            delta=DeltaMessage(content=token_text),
+                            logprobs=chunk_lp,
+                        )
+                    ],
+                    system_fingerprint=SYSTEM_FINGERPRINT,
                 )
-            ],
-            system_fingerprint=SYSTEM_FINGERPRINT,
-        )
-        yield f"data: {chunk.model_dump_json()}\n\n"
+                yield f"data: {chunk.model_dump_json()}\n\n"
+
+            total_completion += len(tokens)
+
+            # Finish chunk
+            chunk = ChatCompletionChunk(
+                id=req_id,
+                created=created,
+                model=config.model_name,
+                choices=[
+                    StreamChoice(
+                        index=idx,
+                        delta=DeltaMessage(),
+                        finish_reason=finish_reason,
+                        logprobs=None,
+                    )
+                ],
+                system_fingerprint=SYSTEM_FINGERPRINT,
+            )
+            yield f"data: {chunk.model_dump_json()}\n\n"
 
     # Update token metrics for streaming
     config._metrics.inc_tokens(total_completion)

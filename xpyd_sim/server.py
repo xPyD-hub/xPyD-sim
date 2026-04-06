@@ -56,15 +56,19 @@ from xpyd_sim.scheduler import InferenceRequest, Scheduler, SchedulingConfig
 SYSTEM_FINGERPRINT = "fp_xpyd_sim"
 
 
+def _should_use_tool_calls(req: ChatCompletionRequest) -> bool:
+    """Decide once per request whether to generate tool calls."""
+    tools = getattr(req, "tools", None)
+    choice = getattr(req, "tool_choice", None)
+    return should_generate_tool_calls(tools, choice)
+
+
 def _build_tool_call_response(req: ChatCompletionRequest):
     """Build tool call objects and estimate tokens.
 
-    Returns (tool_call_objects, num_tokens, tool_calls_data) or None.
+    Returns (tool_call_objects, num_tokens, tool_calls_data).
+    Caller must check _should_use_tool_calls() first.
     """
-    tools = getattr(req, "tools", None)
-    choice = getattr(req, "tool_choice", None)
-    if not should_generate_tool_calls(tools, choice):
-        return None
     tool_calls_data = build_tool_calls(
         req.tools,
         req.tool_choice,
@@ -492,10 +496,12 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             total_completion = 0
             max_choice_tokens = 0
 
+            # Decide tool-call vs text once per request (not per choice)
+            use_tool_calls = _should_use_tool_calls(req)
+
             for i in range(n):
-                tc_result = _build_tool_call_response(req)
-                if tc_result:
-                    tool_call_objects, tc_tokens, _ = tc_result
+                if use_tool_calls:
+                    tool_call_objects, tc_tokens, _ = _build_tool_call_response(req)
                     total_completion += tc_tokens
                     max_choice_tokens = max(max_choice_tokens, tc_tokens)
                     choices.append(
@@ -742,9 +748,10 @@ async def _non_stream_chat_scheduled(
     choices = []
     total_completion = 0
 
-    for i in range(n):
-        tc_result = _build_tool_call_response(req)
+    # Decide tool-call vs text once per request (not per choice)
+    use_tool_calls = _should_use_tool_calls(req)
 
+    for i in range(n):
         # Always go through the scheduler for proper queuing/metrics
         inf_req = InferenceRequest(
             request_id=generate_id("req"),
@@ -768,9 +775,10 @@ async def _non_stream_chat_scheduled(
                     content={"error": {"message": _payload, "type": "invalid_request_error"}},
                 )
 
-        if tc_result:
-            tool_call_objects, tc_tokens, _ = tc_result
-            total_completion += tc_tokens
+        if use_tool_calls:
+            tool_call_objects, _, _ = _build_tool_call_response(req)
+            # Use scheduler's generated_tokens for consistent metrics
+            total_completion += inf_req.generated_tokens
             choices.append(
                 Choice(
                     index=i,
@@ -842,9 +850,10 @@ async def _stream_chat_scheduled(
     decode_delay = _compute_decode_delay(config)
     total_completion = 0
 
-    for idx in range(n):
-        tc_result = _build_tool_call_response(req)
+    # Decide tool-call vs text once per request (not per choice)
+    use_tool_calls = _should_use_tool_calls(req)
 
+    for idx in range(n):
         # Always go through the scheduler for proper queuing/metrics
         inf_req = InferenceRequest(
             request_id=generate_id("req"),
@@ -855,8 +864,8 @@ async def _stream_chat_scheduled(
         )
         await scheduler.submit(inf_req)
 
-        if tc_result:
-            _, tc_tokens, tool_calls_data = tc_result
+        if use_tool_calls:
+            _, _, tool_calls_data = _build_tool_call_response(req)
             # Wait for scheduler to complete (for timing/queuing)
             await inf_req.done_event.wait()
             while not inf_req.token_queue.empty():
@@ -902,7 +911,8 @@ async def _stream_chat_scheduled(
                 system_fingerprint=SYSTEM_FINGERPRINT,
             )
             yield f"data: {chunk.model_dump_json()}\n\n"
-            total_completion += tc_tokens
+            # Use scheduler's generated_tokens for consistent metrics
+            total_completion += inf_req.generated_tokens
             sc = StreamChoice(
                 index=idx,
                 delta=DeltaMessage(),
@@ -1249,10 +1259,14 @@ async def _stream_chat(
     decode_delay = _compute_decode_delay(config)
     total_completion = 0
 
+    # Decide tool-call vs text once per request (not per choice)
+    use_tool_calls = _should_use_tool_calls(req)
+
     for idx in range(n):
-        tc_result = _build_tool_call_response(req)
-        if tc_result:
-            _, tc_tokens, tool_calls_data = tc_result
+        if use_tool_calls:
+            _, tc_tokens, tool_calls_data = _build_tool_call_response(req)
+            # Note: prefill + KV delay already applied in chat_completions()
+            # before this generator is called; no additional delay needed here.
             # First chunk: role + tool_calls
             tc_deltas = []
             for ti, tc in enumerate(tool_calls_data):

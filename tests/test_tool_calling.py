@@ -176,3 +176,74 @@ class TestToolCalling:
                 d = r.json()
                 assert d["choices"][0]["finish_reason"] == "tool_calls"
                 assert d["choices"][0]["message"]["tool_calls"] is not None
+
+    def test_n_greater_than_one_consistent_choices(self):
+        """With n>1, all choices should be the same type (all tool_calls or all text)."""
+        with TestClient(create_app(_cfg())) as c:
+            # required → all choices should have tool_calls
+            r = c.post("/v1/chat/completions", json={
+                "messages": [{"role": "user", "content": "weather"}],
+                "tools": TOOLS,
+                "tool_choice": "required",
+                "n": 3,
+                "max_tokens": 50,
+            })
+            d = r.json()
+            assert len(d["choices"]) == 3
+            for choice in d["choices"]:
+                assert choice["finish_reason"] == "tool_calls"
+                assert choice["message"]["tool_calls"] is not None
+                assert choice["message"]["content"] is None
+
+    def test_n_greater_than_one_auto_consistent(self):
+        """With n>1 and auto, all choices must be same type."""
+        # Force tool_calls path
+        with patch("xpyd_sim.server.should_generate_tool_calls", return_value=True):
+            with TestClient(create_app(_cfg())) as c:
+                r = c.post("/v1/chat/completions", json={
+                    "messages": [{"role": "user", "content": "weather"}],
+                    "tools": TOOLS,
+                    "n": 3,
+                    "max_tokens": 50,
+                })
+                d = r.json()
+                assert len(d["choices"]) == 3
+                types = set()
+                for choice in d["choices"]:
+                    if choice["message"].get("tool_calls"):
+                        types.add("tool_calls")
+                    else:
+                        types.add("text")
+                assert len(types) == 1, f"Mixed choice types: {types}"
+
+        # Force text path
+        with patch("xpyd_sim.server.should_generate_tool_calls", return_value=False):
+            with TestClient(create_app(_cfg())) as c:
+                r = c.post("/v1/chat/completions", json={
+                    "messages": [{"role": "user", "content": "weather"}],
+                    "tools": TOOLS,
+                    "n": 3,
+                    "max_tokens": 50,
+                })
+                d = r.json()
+                assert len(d["choices"]) == 3
+                for choice in d["choices"]:
+                    assert choice["message"]["content"] is not None
+                    assert choice["message"].get("tool_calls") is None
+
+    def test_n_greater_than_one_unique_call_ids(self):
+        """With n>1, each choice should have unique tool call IDs."""
+        with TestClient(create_app(_cfg())) as c:
+            r = c.post("/v1/chat/completions", json={
+                "messages": [{"role": "user", "content": "weather"}],
+                "tools": TOOLS,
+                "tool_choice": "required",
+                "n": 3,
+                "max_tokens": 50,
+            })
+            d = r.json()
+            all_ids = []
+            for choice in d["choices"]:
+                for tc in choice["message"]["tool_calls"]:
+                    all_ids.append(tc["id"])
+            assert len(all_ids) == len(set(all_ids)), f"Duplicate IDs: {all_ids}"
